@@ -1,0 +1,19 @@
+[project]
+name = "agenttool"
+version = "0.1.0"
+description = "AI Video Director + Visual Researcher + Advanced Video Editor (desktop)"
+requires-python = ">=3.11"
+dependencies = ["PySide6>=6.6"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+agenttool = "app.main:main"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["app/tests"]
+addopts = "-q"

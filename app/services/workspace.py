@@ -1,0 +1,237 @@
+"""The application facade the UI talks to.
+
+``Workspace`` wires every service together and owns cross-cutting policy: dirty tracking,
+autosave triggers, recovery, settings and the undo stack lifecycle. The UI never reaches
+into project files, FFmpeg or the filesystem on its own.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+from typing import Callable
+
+from app.ai.provider import AIProviderRegistry
+from app.core.commands import Command, CommandStack
+from app.core.config import Settings, SettingsStore
+from app.core.constants import DEFAULT_ASPECT_RATIO, DEFAULT_FPS, DEFAULT_RESOLUTION, resolve_dimensions
+from app.core.events import EventBus, Topics
+from app.core.exceptions import FFmpegUnavailableError, ProjectError, RecoveryError
+from app.jobs.job import Job
+from app.jobs.job_manager import Dispatcher, JobManager
+from app.logging.logger import get_logger, log_event
+from app.media.importer import MediaImporter
+from app.media.media_probe import MediaProber, locate_binary, run_process
+from app.media.thumbnails import ThumbnailService
+from app.project.autosave import AutosaveService
+from app.project.project import Project
+from app.project.project_commands import SetScriptCommand
+from app.project.project_manager import ProjectManager
+from app.project.project_schema import ProjectSettings
+from app.project.recovery import RecoveryEntry, RecoveryManager
+from app.rendering.renderer import FFmpegRenderer, Renderer
+from app.services.media_service import MediaService
+from app.services.timeline_service import TimelineService
+from app.storage.paths import AppPaths
+
+_log = get_logger(__name__)
+
+
+class Workspace:
+    def __init__(self, paths: AppPaths | None = None, dispatcher: Dispatcher | None = None) -> None:
+        self.paths = paths or AppPaths.default()
+        self.paths.ensure()
+        self.bus = EventBus()
+        self.settings_store = SettingsStore(self.paths.settings_file)
+        self.settings: Settings = self.settings_store.load()
+
+        self.commands = CommandStack(self.bus)
+        self.jobs = JobManager(self.bus, dispatcher=dispatcher)
+        self.projects = ProjectManager(self.bus, self.paths.recent_projects_file)
+        self.prober = MediaProber(self.settings.ffprobe_path)
+        self.thumbnails = ThumbnailService(self.settings.ffmpeg_path)
+        self.importer = MediaImporter(self.prober)
+        self.recovery = RecoveryManager(self.paths.recovery_dir)
+        self.autosave = AutosaveService(
+            self.recovery, on_error=lambda msg: self.bus.publish(Topics.ERROR, message=msg, title="Autosave")
+        )
+        self.ai = AIProviderRegistry()
+        self.renderer: Renderer = FFmpegRenderer(self.settings.ffmpeg_path)
+
+        self.media = MediaService(
+            self.projects, self.commands, self.jobs, self.importer, self.thumbnails, self.bus, self.apply_command
+        )
+        self.timeline = TimelineService(self.projects, self.commands)
+        self.selected_clip_id: str | None = None
+
+        self.bus.subscribe(Topics.PROJECT_CHANGED, self._on_project_changed)
+
+    # ------------------------------------------------------------ state
+    @property
+    def project(self) -> Project | None:
+        return self.projects.current
+
+    def require_project(self) -> Project:
+        if self.projects.current is None:
+            raise ProjectError("Open or create a project first.")
+        return self.projects.current
+
+    # ------------------------------------------------------------ commands
+    def apply_command(self, command: Command) -> None:
+        """Apply a change that is a *project edit* but should not appear in undo history (e.g. import)."""
+        command.do()
+        self.bus.publish(Topics.PROJECT_CHANGED, scope=command.scope, command=command, action="do")
+
+    def _on_project_changed(self, topic: str, payload: dict) -> None:
+        project = self.projects.current
+        if project is None:
+            return
+        self.projects.set_dirty(True)
+        command = payload.get("command")
+        if command is None or getattr(command, "major", True):
+            self.autosave.request(project)  # after major operations
+        if self.selected_clip_id and project.timeline.get_clip(self.selected_clip_id) is None:
+            self.select_clip(None)
+
+    def undo(self) -> None:
+        self.commands.undo()
+
+    def redo(self) -> None:
+        self.commands.redo()
+
+    def select_clip(self, clip_id: str | None) -> None:
+        if clip_id != self.selected_clip_id:
+            self.selected_clip_id = clip_id
+            self.bus.publish(Topics.SELECTION_CHANGED, clip_id=clip_id)
+
+    # ------------------------------------------------------------ project lifecycle
+    def new_project(
+        self,
+        name: str,
+        location: Path | None = None,
+        resolution: str = DEFAULT_RESOLUTION,
+        fps: int = DEFAULT_FPS,
+        aspect_ratio: str = DEFAULT_ASPECT_RATIO,
+    ) -> Project:
+        old = self.projects.current
+        w, h = resolve_dimensions(resolution, aspect_ratio)
+        project = self.projects.create(
+            name, location or Path(self.settings.default_project_location), ProjectSettings(w, h, fps, aspect_ratio)
+        )
+        self._reset_session(old)
+        self._after_open()
+        return project
+
+    def open_project(self, path: Path, from_backup: bool = False) -> Project:
+        old = self.projects.current
+        project = self.projects.open(path, from_backup=from_backup)
+        self._reset_session(old)
+        self._after_open()
+        return project
+
+    def _after_open(self) -> None:
+        project = self.require_project()
+        self.media.ensure_all_thumbnails()
+        for asset in project.missing_assets():
+            self.bus.publish(Topics.STATUS, message=f"Media file missing: {asset.name}")
+
+    def _reset_session(self, old: Project | None) -> None:
+        """Drop session state belonging to ``old`` (the project that was just replaced or closed)."""
+        current = self.projects.current
+        if old is not None:
+            if current is None or current.project_id != old.project_id:
+                self.autosave.clear(old.project_id)
+            for job in self.jobs.active_jobs():
+                self.jobs.cancel(job.id)
+        self.commands.clear()
+        self.select_clip(None)
+
+    def save(self) -> None:
+        project = self.require_project()
+        self.projects.save(project)
+        self.autosave.clear(project.project_id)
+        self.bus.publish(Topics.STATUS, message=f"Saved “{project.project_name}”")
+
+    def save_as(self, new_parent: Path, new_name: str, on_done: Callable[[Project], None] | None = None) -> Job:
+        """Copy the project to a new location in a background job, then switch to the copy."""
+        project = self.require_project()
+        project.validate()
+
+        def work(ctx) -> Project:
+            return self.projects.save_as(
+                new_parent, new_name, project, progress=lambda f, m: ctx.report(f * 100, m)
+            )
+
+        def done(job: Job) -> None:
+            old = self.projects.current
+            self.projects.switch_to(job.result)
+            self._reset_session(old)
+            self._after_open()
+            self.bus.publish(Topics.STATUS, message=f"Saved as “{job.result.project_name}”")
+            if on_done:
+                on_done(job.result)
+
+        def failed(job: Job) -> None:
+            self.bus.publish(Topics.ERROR, message=job.error or "Save As failed.", title="Save As")
+
+        return self.jobs.submit("project.save_as", work, title=f"Saving project as {new_name}", on_complete=done, on_error=failed)
+
+    def close_project(self) -> None:
+        """Close the current project. The caller is responsible for asking about unsaved changes."""
+        old = self.projects.current
+        self.projects.close()
+        self._reset_session(old)
+
+    # ------------------------------------------------------------ script
+    def set_script(self, text: str) -> None:
+        project = self.require_project()
+        if text != project.script.text:
+            self.commands.execute(SetScriptCommand(project, text))
+
+    # ------------------------------------------------------------ autosave & recovery
+    def autosave_tick(self) -> bool:
+        """Periodic autosave (driven by a timer in the UI)."""
+        return self.autosave.request(self.projects.current)
+
+    def pending_recovery(self) -> list[RecoveryEntry]:
+        return self.recovery.list_entries()
+
+    def recover(self, project_id: str) -> Project:
+        old = self.projects.current
+        project = self.recovery.load_project(project_id)
+        self.projects.switch_to(project)
+        self._reset_session(old)
+        self.projects.set_dirty(True)  # recovered state is NOT saved until the user chooses to
+        self.media.ensure_all_thumbnails()
+        log_event(_log, "recovery.applied", project_id=project_id)
+        return project
+
+    def discard_recovery(self, project_id: str) -> None:
+        self.recovery.discard(project_id)
+
+    # ------------------------------------------------------------ settings
+    def update_settings(self, settings: Settings) -> None:
+        settings = settings.sanitized()
+        self.settings_store.save(settings)
+        self.settings = settings
+        self.prober.configure(settings.ffprobe_path)
+        self.thumbnails.configure(settings.ffmpeg_path)
+        self.renderer = FFmpegRenderer(settings.ffmpeg_path)
+        self.bus.publish(Topics.STATUS, message="Settings saved")
+
+    def describe_ffmpeg(self, configured_path: str = "") -> str:
+        """Locate FFmpeg (optionally at ``configured_path``) and return its version line. Raises ``AppError``."""
+        binary = locate_binary("ffmpeg", configured_path)
+        try:
+            first = run_process([binary, "-version"], timeout=10).stdout.splitlines()
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise FFmpegUnavailableError("FFmpeg was found but could not be run.", details=str(exc)) from exc
+        return first[0] if first else binary
+
+    # ------------------------------------------------------------ shutdown
+    def shutdown(self) -> None:
+        project = self.projects.current
+        if project is not None and not project.dirty:
+            self.autosave.clear(project.project_id)  # clean exit leaves no recovery data
+        self.jobs.shutdown()
+        self.autosave.shutdown()

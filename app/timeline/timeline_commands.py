@@ -1,0 +1,252 @@
+"""Undoable timeline operations."""
+
+from __future__ import annotations
+
+from app.core.commands import Command
+from app.core.exceptions import TimelineError
+from app.timeline.clip import Clip
+from app.timeline.timeline import Timeline
+from app.timeline.track import Track
+
+SCALE_RANGE = (0.01, 20.0)
+SPEED_RANGE = (0.1, 8.0)
+
+
+class _TimelineCommand(Command):
+    scope = "timeline"
+
+    def __init__(self, timeline: Timeline) -> None:
+        self.timeline = timeline
+
+
+# ---------------------------------------------------------------- tracks
+class AddTrackCommand(_TimelineCommand):
+    description = "Add track"
+
+    def __init__(self, timeline: Timeline, track: Track, index: int | None = None) -> None:
+        super().__init__(timeline)
+        self.track = track
+        self.index = index
+
+    def do(self) -> None:
+        if not self.track.name.strip():
+            raise TimelineError("A track needs a name.")
+        self.timeline.insert_track(self.track, self.index)
+
+    def undo(self) -> None:
+        self.timeline.remove_track(self.track.id)
+
+
+class RemoveTrackCommand(_TimelineCommand):
+    description = "Delete track"
+
+    def __init__(self, timeline: Timeline, track_id: str) -> None:
+        super().__init__(timeline)
+        self.track_id = track_id
+        self._removed: tuple[Track, int] | None = None
+
+    def do(self) -> None:
+        self.timeline.require_unlocked(self.track_id)
+        self._removed = self.timeline.remove_track(self.track_id)
+
+    def undo(self) -> None:
+        assert self._removed is not None
+        track, index = self._removed
+        self.timeline.insert_track(track, index)
+
+
+class RenameTrackCommand(_TimelineCommand):
+    description = "Rename track"
+
+    def __init__(self, timeline: Timeline, track_id: str, name: str) -> None:
+        super().__init__(timeline)
+        self.track_id = track_id
+        self.name = name.strip()
+        self._old: str | None = None
+
+    def do(self) -> None:
+        if not self.name:
+            raise TimelineError("A track needs a name.")
+        track = self.timeline.get_track(self.track_id)
+        self._old = track.name
+        track.name = self.name
+
+    def undo(self) -> None:
+        assert self._old is not None
+        self.timeline.get_track(self.track_id).name = self._old
+
+
+_FLAG_TEXT = {
+    "hidden": ("Hide track", "Show track"),
+    "muted": ("Mute track", "Unmute track"),
+    "locked": ("Lock track", "Unlock track"),
+}
+
+
+class SetTrackFlagCommand(_TimelineCommand):
+    """Toggle ``hidden`` / ``muted`` / ``locked``."""
+
+    major = False
+
+    def __init__(self, timeline: Timeline, track_id: str, flag: str, value: bool) -> None:
+        if flag not in ("hidden", "muted", "locked"):
+            raise ValueError(flag)
+        super().__init__(timeline)
+        self.track_id, self.flag, self.value = track_id, flag, value
+        self.description = _FLAG_TEXT[flag][0 if value else 1]
+        self._old = False
+
+    def do(self) -> None:
+        track = self.timeline.get_track(self.track_id)
+        self._old = getattr(track, self.flag)
+        setattr(track, self.flag, self.value)
+
+    def undo(self) -> None:
+        setattr(self.timeline.get_track(self.track_id), self.flag, self._old)
+
+
+# ---------------------------------------------------------------- clips
+class AddClipCommand(_TimelineCommand):
+    description = "Add clip"
+
+    def __init__(self, timeline: Timeline, clip: Clip) -> None:
+        super().__init__(timeline)
+        self.clip = clip
+
+    def do(self) -> None:
+        self.timeline.require_unlocked(self.clip.track_id)
+        self.timeline.check_free(self.clip.track_id, self.clip.timeline_start, self.clip.duration)
+        self.timeline.insert_clip(self.clip.snapshot())
+
+    def undo(self) -> None:
+        self.timeline.detach_clip(self.clip.id)
+
+
+class DeleteClipCommand(_TimelineCommand):
+    description = "Delete clip"
+
+    def __init__(self, timeline: Timeline, clip_id: str) -> None:
+        super().__init__(timeline)
+        self.clip_id = clip_id
+        self._removed: Clip | None = None
+
+    def do(self) -> None:
+        track, clip = self.timeline.find_clip(self.clip_id)
+        self.timeline.require_unlocked(track.id)
+        self._removed = self.timeline.detach_clip(self.clip_id)
+
+    def undo(self) -> None:
+        assert self._removed is not None
+        self.timeline.insert_clip(self._removed)
+
+
+class _ClipEditCommand(_TimelineCommand):
+    """Base for edits expressed as before/after clip states."""
+
+    major = True
+
+    def __init__(self, timeline: Timeline, clip_id: str) -> None:
+        super().__init__(timeline)
+        self.clip_id = clip_id
+        self._before: Clip | None = None
+        self._after: Clip | None = None
+
+    def _compute(self, before: Clip) -> Clip:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def do(self) -> None:
+        if self._after is None:
+            track, clip = self.timeline.find_clip(self.clip_id)
+            self.timeline.require_unlocked(track.id)
+            before = clip.snapshot()
+            after = self._compute(before)
+            if after.track_id != before.track_id:
+                self.timeline.require_unlocked(after.track_id)
+            self.timeline.check_free(after.track_id, after.timeline_start, after.duration, ignore_clip_id=after.id)
+            self._before, self._after = before, after
+        self.timeline.restore_clip(self._after)
+
+    def undo(self) -> None:
+        assert self._before is not None
+        self.timeline.restore_clip(self._before)
+
+
+class MoveClipCommand(_ClipEditCommand):
+    description = "Move clip"
+
+    def __init__(self, timeline: Timeline, clip_id: str, new_start: float, new_track_id: str | None = None) -> None:
+        super().__init__(timeline, clip_id)
+        self.new_start = new_start
+        self.new_track_id = new_track_id
+
+    def _compute(self, before: Clip) -> Clip:
+        after = before.snapshot()
+        after.timeline_start = max(0.0, self.new_start)
+        if self.new_track_id:
+            after.track_id = self.new_track_id
+        return after
+
+
+class TrimClipCommand(_ClipEditCommand):
+    description = "Trim clip"
+
+    def __init__(
+        self,
+        timeline: Timeline,
+        clip_id: str,
+        *,
+        new_start: float | None = None,
+        new_end: float | None = None,
+        max_source: float | None = None,
+    ) -> None:
+        super().__init__(timeline, clip_id)
+        self.new_start, self.new_end, self.max_source = new_start, new_end, max_source
+        self.description = "Trim clip start" if new_start is not None and new_end is None else "Trim clip end"
+
+    def _compute(self, before: Clip) -> Clip:
+        r = self.timeline.compute_trim(
+            before, new_start=self.new_start, new_end=self.new_end, max_source=self.max_source
+        )
+        after = before.snapshot()
+        after.timeline_start, after.duration = r.start, r.duration
+        after.source_in, after.source_out = r.source_in, r.source_out
+        return after
+
+
+class SetClipPropertiesCommand(_ClipEditCommand):
+    """Change transform properties (position/scale/rotation/opacity/speed)."""
+
+    description = "Edit clip properties"
+    major = False
+    merge_key = None
+
+    def __init__(self, timeline: Timeline, clip_id: str, **changes: object) -> None:
+        super().__init__(timeline, clip_id)
+        allowed = {"position", "scale", "rotation", "opacity", "speed"}
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"Unsupported clip properties: {sorted(unknown)}")
+        self.changes = changes
+
+    def _compute(self, before: Clip) -> Clip:
+        after = before.snapshot()
+        c = self.changes
+        if "position" in c:
+            x, y = c["position"]  # type: ignore[misc]
+            after.position = (float(x), float(y))
+        if "scale" in c:
+            after.scale = _in_range("Scale", float(c["scale"]), *SCALE_RANGE)  # type: ignore[arg-type]
+        if "rotation" in c:
+            after.rotation = float(c["rotation"])  # type: ignore[arg-type]
+        if "opacity" in c:
+            after.opacity = _in_range("Opacity", float(c["opacity"]), 0.0, 1.0)  # type: ignore[arg-type]
+        if "speed" in c:
+            after.speed = _in_range("Speed", float(c["speed"]), *SPEED_RANGE)  # type: ignore[arg-type]
+            after.duration = (before.source_out - before.source_in) / after.speed
+        return after
+
+
+def _in_range(label: str, value: float, low: float, high: float) -> float:
+    if not (low <= value <= high):
+        raise TimelineError(f"{label} must be between {low:g} and {high:g}.")
+    return value
