@@ -436,13 +436,16 @@ def test_pauses_filled_with_music_are_pauses_but_not_silence():
 
 
 def test_pause_threshold_between_speech_runs():
-    short = analyze("pauses_short", synth_voice(30, [(1, 7), (7.15, 13), (13.4, 19), (19.55, 25), (25.2, 29)]))
+    v = synth_voice(30, [(1, 7), (7.05, 13), (13.4, 19), (19.55, 25), (25.05, 29)])
+    gaps = [(a, b) for a, b in zero_runs(v, 0.05) if 0.5 < a and b < 29.5]  # the generated gaps: two ~0.1 s (breaths inside a phrase), two 0.5-0.6 s pauses
+    pauses = [b - a for a, b in gaps if b - a >= 0.4]
+    assert len(pauses) == 2 and all(b - a < 0.15 for a, b in gaps if b - a < 0.4)
+    short = analyze("pauses_short", v)
+    assert len(short.pauses) == 2  # the short gaps are inside the speech run, only the real pauses count
     assert short.profile.long_pause_frequency == 0.0
-    assert short.profile.average_pause_duration < 0.5  # 0.15 s gaps are inside the speech run; the 0.4 / 0.55 s ones are the pauses
+    assert abs(short.profile.average_pause_duration - float(np.mean(pauses))) < 0.1
     none = analyze("pauses_none", synth_voice(30, [(1, 29)]))
     assert none.profile.average_pause_duration == 0.0 and none.profile.long_pause_frequency == 0.0
-
-
 def test_silence_threshold_adapts_to_the_files_own_level():
     v = synth_voice(30, VOICE)
     truth = zero_runs(v)

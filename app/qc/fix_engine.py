@@ -18,7 +18,7 @@ from __future__ import annotations
 import copy
 import math
 import uuid
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -154,9 +154,14 @@ def _protection(project: Project, track: Track | None, clip: Clip) -> str:
     for decisions in (project.editing_decisions, project.presentation_decisions):
         for d in decisions.values():
             mine = d.decision_id == clip.ai_decision_id or d.target_id == clip.id or bool(clip.slot and d.slot == clip.slot and d.scene_id == clip.scene_id)
-            if mine and (d.locked or _owner(d.created_by) == "USER"):
+            if mine and (d.locked or (_owner(d.created_by) == "USER" and not _qc_owned(d))):
                 return "The decision behind this element is locked or was set by you: QC does not change it."
     return ""
+
+
+def _qc_owned(d: Any) -> bool:
+    """A ducking decision created by an accepted QC fix (and not edited by the user since): QC may adjust the ducking again, e.g. for another stretch of speech."""
+    return getattr(d, "type", None) is PresentationType.DUCKING and bool(d.parameters.get("qc_fix")) and not d.parameters.get("edited") and not d.locked
 
 
 # ---------------------------------------------------------------------------------------------- the working copy
@@ -339,9 +344,7 @@ class QCFixEngine:
         """(possible, reason). Confirmation is a separate question: a fix that needs it is still possible."""
         try:
             project = self._project()
-            live = next((i for i in project.qc_issues if i.issue_id == issue.issue_id), None)
-            if live is None:
-                return False, "That issue is no longer in the QC results: run QC again."
+            live = self._issue(project, issue.issue_id)
             spec = live.fix
             if spec is None:
                 return False, "There is no automatic fix for this issue."
@@ -502,7 +505,7 @@ class QCFixEngine:
             try:
                 plan, safe, trial = self._prepare(project, issue, trial, baseline)
                 if not safe and (safe_only or not confirmed):
-                    raise QCError("Needs your confirmation." if CATALOG[issue.fix.kind].safe_by_design or not safe_only else "Needs your confirmation: it changes your edit.")  # type: ignore[union-attr]
+                    raise QCError("Needs your confirmation: it changes your edit.")
             except QCError as exc:
                 self.last_skipped.append(SkippedFix(issue.issue_id, issue.code, exc.user_message))
                 continue
@@ -510,7 +513,7 @@ class QCFixEngine:
             applied.append((issue, plan, safe, bool(confirmed and not safe)))
         if not applied:
             return []
-        return self._commit(project, work, applied, label, checkpoint=True, strict_checkpoint=any(p.destructive for _i, p, _s, _c in applied))
+        return self._commit(project, work, applied, label, checkpoint=True, strict_checkpoint=any(p.destructive for _i, p, _sf, _cf in applied))
 
     @staticmethod
     def _batch_label(prefix: str | None) -> str:
@@ -533,7 +536,7 @@ class QCFixEngine:
                              confirmed, run_id=i.run_id, checkpoint=name) for i, p, safe, confirmed in applied]
         commands = self._commands(project, work, f"QC fix: {description}")
         commands += [MarkIssueFixedCommand(project, rec.issue_id, rec) for rec in records]
-        kinds = {p.kind for _i, p, _s, _c in applied}
+        kinds = {p.kind for _i, p, _sf, _cf in applied}
         scope = "assets" if kinds == {"asset.relink"} else "editing" if kinds == {"caption.restyle"} else "timeline"
         try:
             self._execute(CompositeCommand(f"QC fix: {description}", commands, scope=scope))
@@ -907,7 +910,7 @@ class QCFixEngine:
             prop, interp = str(item["property"]), str(item.get("interpolation") or "linear")
             kf = Keyframe(prop, round(float(item["time"]), 3), round(float(item["value"]), 4), interp if interp in INTERPOLATIONS else "linear", "")
             rng = KEYFRAME_RANGES.get(prop)
-            if kf.problems(cur.duration) or (rng is not None and (kf.value <= 0 if prop == "scale" else False) or (rng is not None and not rng[0] <= kf.value <= rng[1])):
+            if kf.problems(cur.duration) or (rng is not None and not rng[0] <= kf.value <= rng[1]):
                 raise QCError(STALE)  # the recommended motion no longer fits this clip
             new.append(kf)
         props = {k.property for k in new}
@@ -1120,4 +1123,3 @@ def _duck_points(old: list[Keyframe], dur: float, spans: list[tuple[float, float
 
 
 __all__ = ["QCFixEngine", "FixPreview", "SkippedFix", "STALE", "OPENS_PAGE"]
-_ = (fields, Creator)
