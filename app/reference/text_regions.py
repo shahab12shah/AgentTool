@@ -33,6 +33,10 @@ BLOCK_EDGE_MIN = 0.10  # edge density of a text-like block
 BLOCK_EDGE_MAX = 1.01
 MIN_LINE_PX = 7  # a line shorter than this (at any resolution) cannot be told from noise
 MAX_LINES_PER_FRAME = 10
+COARSE = 3  # large text is searched again on a frame shrunk by this factor, where its glyphs are the size of ordinary text
+COARSE_MIN_H = 180  # frames shorter than this are not shrunk (the coarse frame would be too small to hold text)
+STEM_MIN = 0.55  # stem continuity (see ``_stem_continuity``) from which a coarse band is one row of large glyphs
+BIG_LINE = 0.10  # a coarse line is "large text" from this height (fraction of the frame height)
 
 
 # ---------------------------------------------------------------------------------------------- observations
@@ -185,15 +189,38 @@ def _band(x: float, lo0: float, lo1: float, hi1: float, hi0: float) -> float:
     return min(_ramp(x, lo0, lo1), _ramp(x, hi0, hi1))
 
 
+def _stem_continuity(ex: np.ndarray) -> float:
+    """How continuously vertical strokes run through a box, 0..1: the mean of the three emptiest interior rows' vertical-edge counts relative to the median row. The
+    stems of ONE row of large glyphs run through every row (>= 0.75 measured on digits and capitals of many sizes); between two lines of ordinary text the rows of
+    the gap carry (almost) no stem edges (<= 0.3)."""
+    h = ex.shape[0]
+    rp = ex.sum(axis=1).astype(np.float32)
+    med = float(np.median(rp))
+    lo, hi = int(0.15 * h), int(0.85 * h)
+    if h < 12 or hi - lo < 3 or med <= 0:
+        return 0.0
+    return float(np.sort(rp[lo:hi])[:3].mean() / med)
+
+
+def _inside(f: LineObs, box: tuple[int, int, int, int]) -> bool:
+    """Is at least 60 % of the line's area inside the box (x0, y0, x1, y1)?"""
+    ix = min(f.x1, box[2]) - max(f.x0, box[0])
+    iy = min(f.y1, box[3]) - max(f.y0, box[1])
+    return ix > 0 and iy > 0 and ix * iy >= 0.6 * max(1, f.w * f.h)
+
+
 # ---------------------------------------------------------------------------------------------- the detector
 class TextRegionDetector:
     """Finds text-like lines in frames of one fixed size. Stateless between frames (all temporal logic lives in the analyzer)."""
 
-    def __init__(self, width: int, height: int) -> None:
+    def __init__(self, width: int, height: int, *, coarse: bool = False) -> None:
         self.width, self.height = int(width), int(height)
         self.bs = max(3, int(round(self.height / BLOCK_ROWS)))
         self.gh, self.gw = self.height // self.bs, self.width // self.bs
         self.scale = self.height / 270.0
+        # Large text (a number card, a giant title) falls apart at full resolution: its thick strokes have an empty interior, so the row profile of ONE glyph has
+        # several peaks and valleys that look like separate lines. Shrunk by COARSE it is ordinary text, so a second detector looks for it there.
+        self._big = None if coarse or self.height < COARSE_MIN_H else TextRegionDetector(self.width // COARSE, self.height // COARSE, coarse=True)
 
     # ------------------------------------------------------------------ public
     def detect(self, frame: np.ndarray) -> FrameObs:
@@ -231,6 +258,8 @@ class TextRegionDetector:
             if int(textish[y0:y1, x0:x1].sum()) < 4:  # a lone corner or speck of a hard edge is not a line of text
                 continue
             lines += self._lines_in(e, ex, ey, gm, rgb, luma, x0 * bs, y0 * bs, min(w, x1 * bs), min(h, y1 * bs))
+        if self._big is not None:
+            lines = self._merge_scales(lines, self._big.detect(self._shrink(rgb)).lines, ex)
         lines.sort(key=lambda ln: -ln.text_score)
         obs.lines = lines[:MAX_LINES_PER_FRAME]
         covered = np.zeros((gh, gw), dtype=bool)
@@ -243,6 +272,39 @@ class TextRegionDetector:
         return obs
 
     # ------------------------------------------------------------------ internals
+    @staticmethod
+    def _shrink(rgb: np.ndarray) -> np.ndarray:
+        """Block-average by COARSE (area filter, so strokes thinner than a block fade and thick ones stay)."""
+        h, w = rgb.shape[0] // COARSE * COARSE, rgb.shape[1] // COARSE * COARSE
+        return rgb[:h, :w].reshape(h // COARSE, COARSE, w // COARSE, COARSE, 3).mean(axis=(1, 3))
+
+    def _merge_scales(self, fine: list[LineObs], big: list[LineObs], ex: np.ndarray) -> list[LineObs]:
+        """Large text found at the coarse scale replaces the fragments the full-resolution pass made of it. A coarse line only counts if it is large (>= BIG_LINE of
+        the frame height), clearly text-like, filled by full-resolution fragments (not a plate with margins around a smaller line) and built like ONE row of tall
+        glyphs: vertical stroke edges (stems) run through all of its rows. Two lines of ordinary
+        text that the shrunk frame merged into one band never have that (their stems stop in the gap between the lines). A fine line that already spans
+        the coarse one (ordinary text) is kept as it is."""
+        out = list(fine)
+        for b in big:
+            if b.text_score < 0.55 or b.h * COARSE < BIG_LINE * self.height:
+                continue
+            box = (b.x0 * COARSE, b.y0 * COARSE, b.x1 * COARSE, b.y1 * COARSE)
+            bh, bw = box[3] - box[1], box[2] - box[0]
+            inside = [f for f in out if _inside(f, box)]
+            if not inside or any(f.h >= 0.8 * bh and f.w >= 0.6 * bw for f in inside):
+                continue
+            if max(f.y1 for f in inside) - min(f.y0 for f in inside) < 0.75 * bh:  # fragments fill their glyph row; text on a plate leaves the plate's margin around it
+                continue
+            if _stem_continuity(ex[box[1]:box[3], box[0]:box[2]]) < STEM_MIN:
+                continue
+            prof = np.repeat(b.profile, COARSE)[:bw]
+            if prof.size < bw:
+                prof = np.pad(prof, (0, bw - prof.size), mode="edge")
+            big_line = LineObs(box[0], box[1], box[2], box[3], b.text_score, b.density, b.contrast, b.energy * COARSE * COARSE, prof.astype(np.uint16), b.box, b.emphasis, b.colour_known)
+            out = [f for f in out if f not in inside]
+            out.append(big_line)
+        return out
+
     @staticmethod
     def _rgb(frame: np.ndarray) -> np.ndarray:
         a = np.asarray(frame)

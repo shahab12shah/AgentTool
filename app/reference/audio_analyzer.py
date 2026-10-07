@@ -93,8 +93,8 @@ SFX_MAX_S = 1.2
 SFX_MIN_S = 0.03
 SFX_MERGE_S = 0.3
 SFX_GATE_REL_DB = 40.0
-SFX_BAND_GATE_REL_DB = 10.0  # a band burst (high / low band only) must reach within 10 dB of the loud level to be an effect rather than speech texture (a voice's own
-                            # high band sits ~20 dB under its loud level, a sibilant ~12 dB, a whoosh within a few dB)
+SFX_BAND_GATE_REL_DB = 13.0  # a band burst (high / low band only) must reach within 13 dB of the loud level to be an effect rather than speech texture (a voice's own
+                            # high band sits ~20 dB under its loud level, a sibilant ~12-15 dB, a whoosh within a few dB; the stick-out test does the rest)
 SFX_SPEECH_DILATE_S = 0.2  # speech context reaches this far past a speech run (unvoiced consonants hang off its edges)
 SFX_SPEECH_COVER = 0.25  # an event that overlaps speech this much is judged by its band signature only
 SFX_ALIGN_BEFORE_S, SFX_ALIGN_AFTER_S = 0.15, 0.4  # an effect is "on" a boundary when it starts up to 0.15 s before .. 0.4 s after it
@@ -620,9 +620,14 @@ class _Run:
         crest = 0.0
         if m.sum() >= 4:
             # level variation of the bed itself: speech-edge steps are excluded (the duck lives there) and the duck is added back inside speech
-            stable = m & ~zone
+            # nor are the first / last second of a bed (its fade in / out and the smear of the floor estimate there)
+            core = m.copy()
+            for a, b in _runs(m):
+                core[a:min(b, a + 2)] = False
+                core[max(a, b - 2):b] = False
+            stable = core & ~zone
             if stable.sum() < 4:
-                stable = m
+                stable = core if core.sum() >= 4 else m
             v = (lvl + (self.duck_db if self.duck_ok else 0.0) * (self.speech_frac >= 0.5))[stable]
             spread = float(np.percentile(v, 90) - np.percentile(v, 10))
             # texture intensity: how far the bed's mean power stands above its stationary floor in speech-free, effect-free steps (a beat or swell leaves the
@@ -725,7 +730,8 @@ class _Run:
             if kind == "hb" and not hb_m.any():
                 continue
             g = gate if kind == "tot" else max(SILENCE_ABS_MIN_DB, self.loud - SFX_BAND_GATE_REL_DB)
-            for on, off, pk in self._bursts(ser, g, rise):
+            bursts = self._bursts(ser, g, rise)
+            for on, off, pk in bursts:
                 cover = float(sp_dil[on:off + 1].mean())
                 if kind == "tot":
                     if cover >= SFX_SPEECH_COVER:
@@ -733,7 +739,7 @@ class _Run:
                     if ser[pk] < floor_frame[pk] + SFX_OVER_BED_DB:
                         continue  # not clearly louder than the bed: a beat or swell of the music, not an effect
                 else:
-                    ctx = np.concatenate((ser[max(0, pk - 80):max(0, pk - 20)], ser[pk + 20:pk + 80]))
+                    ctx = self._context(ser, pk, bursts)
                     if len(ctx) >= 20 and (ser[pk] < float(np.percentile(ctx, 90)) + SFX_STICKOUT_DB or ser[pk] < float(ctx.max()) + 2.0):
                         continue  # no louder than its own neighbourhood (a sibilant, a bass note)
                 events.append((on, off, pk, float(ser[pk])))
@@ -766,6 +772,16 @@ class _Run:
             "text": self._share_on(self.sfx_times, self.texts),
             "reveals": self._share_on(self.sfx_times, self.changes),
         }
+
+    @staticmethod
+    def _context(ser: np.ndarray, pk: int, bursts: list[tuple[int, int, int]]) -> np.ndarray:
+        """The neighbourhood a band burst must stick out of: the series 0.5-2 s either side of its peak. Other bursts more than 1 s away are left out - a dense
+        run of effects must not hide each other - while the ones right next to it stay (a sibilant is one of many close by and sticks out of nothing)."""
+        keep = np.ones(len(ser), dtype=bool)
+        for on, off, p in bursts:
+            if abs(p - pk) > 40:
+                keep[max(0, on - 4):off + 5] = False
+        return np.concatenate((ser[max(0, pk - 80):max(0, pk - 20)][keep[max(0, pk - 80):max(0, pk - 20)]], ser[pk + 20:pk + 80][keep[pk + 20:pk + 80]]))
 
     def _off_beat(self, starts: np.ndarray) -> list[bool]:
         """False for events that belong to a regular pulse: most gaps between consecutive events share one spacing (0.25-1.2 s, +-0.08 s) - a beat or
