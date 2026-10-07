@@ -282,3 +282,48 @@ def cand(title, description="", source_type=SourceType.STOCK_VIDEO, kind=None, t
     for k, v in kw.items():
         setattr(c, k, v)
     return c
+
+
+# ====================================================================== Phase 5 audio helpers
+def write_speech_wav(path, words, total: float, sr: int = 16000, amp: float = 0.4, freq: float = 220.0, noise: float = 0.0, loud: dict | None = None):
+    """A WAV whose energy follows word timings: tone bursts during words, silence (or faint noise) between them. ``loud`` maps word index -> gain."""
+    import wave
+
+    import numpy as np
+
+    n = int(total * sr)
+    t = np.arange(n) / sr
+    sig = np.zeros(n, dtype=np.float32)
+    rng = np.random.default_rng(1)
+    if noise:
+        sig += (rng.standard_normal(n) * noise).astype(np.float32)
+    for i, w in enumerate(words):
+        a, b = int(w.start * sr), min(n, int(w.end * sr))
+        g = (loud or {}).get(i, 1.0)
+        env = np.ones(b - a, dtype=np.float32)
+        ramp = min(200, (b - a) // 4)
+        if ramp > 0:
+            env[:ramp], env[-ramp:] = np.linspace(0, 1, ramp), np.linspace(1, 0, ramp)
+        sig[a:b] += (amp * g * np.sin(2 * np.pi * freq * t[a:b]) * env).astype(np.float32)
+    pcm = (np.clip(sig, -1, 1) * 32767).astype("<i2")
+    with wave.open(str(path), "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(sr)
+        f.writeframes(pcm.tobytes())
+    return path
+
+
+def write_tone_wav(path, seconds: float, amp: float = 0.3, freq: float = 440.0, sr: int = 16000):
+    import wave
+
+    import numpy as np
+
+    t = np.arange(int(seconds * sr)) / sr
+    pcm = (np.clip(amp * np.sin(2 * np.pi * freq * t), -1, 1) * 32767).astype("<i2")
+    with wave.open(str(path), "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(sr)
+        f.writeframes(pcm.tobytes())
+    return path

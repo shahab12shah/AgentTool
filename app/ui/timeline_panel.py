@@ -24,7 +24,8 @@ from app.ui.theme import palette
 from app.ui.timeline_canvas import MAX_PPS, MIN_PPS, ROW_H, RULER_H, TimelineCanvas
 
 HEADER_W = 200
-BUTTONS = (("hidden", "H", "Hide / show track"), ("muted", "M", "Mute track"), ("locked", "L", "Lock / unlock track"))
+BUTTONS = (("hidden", "H", "Hide / show track"), ("muted", "M", "Mute track"), ("solo", "S", "Solo track (audio only)"), ("locked", "L", "Lock / unlock track"))
+AUDIO_ONLY = {"solo"}
 BTN = 20
 
 
@@ -55,6 +56,8 @@ class TrackHeaders(QWidget):
         if not 0 <= row < len(project.timeline.tracks):
             return None
         for i in range(len(BUTTONS)):
+            if BUTTONS[i][0] in AUDIO_ONLY and not project.timeline.tracks[row].is_audio:
+                continue
             bx, by, bw, bh = self._button_rect(row, i)
             if bx <= x <= bx + bw and by <= y <= by + bh:
                 return row, i
@@ -77,8 +80,11 @@ class TrackHeaders(QWidget):
             p.drawLine(0, y + ROW_H, HEADER_W, y + ROW_H)
             p.setPen(QColor(c["muted"] if track.hidden else c["text"]))
             name_w = HEADER_W - 16 - len(BUTTONS) * (BTN + 3)
-            p.drawText(10, y, name_w, ROW_H, Qt.AlignmentFlag.AlignVCenter, fm.elidedText(track.name, Qt.TextElideMode.ElideRight, name_w))
+            label = track.name + (f"  {track.volume:.0%}" if track.is_audio and abs(track.volume - 1.0) > 1e-9 else "")
+            p.drawText(10, y, name_w, ROW_H, Qt.AlignmentFlag.AlignVCenter, fm.elidedText(label, Qt.TextElideMode.ElideRight, name_w))
             for b, (flag, letter, _tip) in enumerate(BUTTONS):
+                if flag in AUDIO_ONLY and not track.is_audio:
+                    continue
                 bx, by, bw, bh = self._button_rect(i, b)
                 on = getattr(track, flag)
                 p.setBrush(QColor(c["accent"]) if on else QColor(c["bg"]))
@@ -114,6 +120,11 @@ class TrackHeaders(QWidget):
         if hit and hit[1] is None:
             self.rename(self.ctx.ws.project.timeline.tracks[hit[0]].id)
 
+    def _volume(self, track) -> None:
+        pct, ok = QInputDialog.getInt(self, "Track volume", "Volume (%):", int(round(track.volume * 100)), 0, 200)
+        if ok:
+            self.ctx.guard(self, lambda: self.ctx.ws.timeline.set_track_volume(track.id, pct / 100.0), modal=True, title="Track volume")
+
     def rename(self, track_id: str) -> None:
         track = self.ctx.ws.project.timeline.get_track(track_id)
         name, ok = QInputDialog.getText(self, "Rename track", "Track name:", text=track.name)
@@ -130,6 +141,8 @@ class TrackHeaders(QWidget):
                        lambda: self.ctx.guard(self, lambda: svc.set_track_flag(track.id, "muted", not track.muted)))
         menu.addAction("Unlock track" if track.locked else "Lock track",
                        lambda: self.ctx.guard(self, lambda: svc.set_track_flag(track.id, "locked", not track.locked)))
+        if track.is_audio:
+            menu.addAction("Set volume…", lambda: self._volume(track))
         menu.addSeparator()
         menu.addAction("Delete track", lambda: self.ctx.guard(self, lambda: svc.remove_track(track.id), modal=True, title="Delete track"))
         menu.exec(pos)
@@ -206,7 +219,7 @@ class TimelinePanel(QWidget):
         b = ctx.bridge
         for topic in ("project.opened", "project.closed"):
             b.on(topic, lambda p: self.reload())
-        b.on("project.changed", lambda p: self.reload() if p.get("scope") in ("timeline", "assets") else None)
+        b.on("project.changed", lambda p: self.reload() if p.get("scope") in ("timeline", "assets", "waveform", "editing") else None)
         b.on("selection.changed", lambda p: (self.canvas.update(), self._update_buttons()))
         self.reload()
 

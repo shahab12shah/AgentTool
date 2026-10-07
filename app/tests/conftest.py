@@ -139,3 +139,25 @@ def edit_ws(research_ws, tmp_path):
         a = VisualAssignment(sc.id, None, asset.id, "USER", 90.0, True, False, acquisition=Acquisition.LOCAL, source_type=asset.source_type)
         ws.apply_command(SceneDecisionCommand(p, sc.id, "assign", assignment=a))
     return ws
+
+
+@pytest.fixture
+def pres_ws(edit_ws, tmp_path):
+    """Phase 5 starting point: the AI edit is generated; a music file and a small SFX library are in the project."""
+    from app.tests.helpers import write_tone_wav
+
+    ws = edit_ws
+    d = tmp_path / "audio_lib"
+    d.mkdir()
+    files = [write_tone_wav(d / "music_bed.wav", 40.0, 0.4, 110.0)] + [write_tone_wav(d / f"{n}.wav", 0.8, 0.5, f) for n, f in
+                                                                       (("impact", 70.0), ("tick", 1800.0), ("paper", 900.0), ("warning", 300.0), ("transition", 500.0))]
+    ws.media.import_files(files)
+    assert ws.jobs.wait_idle(60)
+    by = {a.name: a for a in ws.project.assets.all()}
+    ws.audio_by = by
+    ws.presentation.tag_asset(by["music_bed.wav"].id, "music")
+    for n in ("impact", "tick", "paper", "warning", "transition"):
+        ws.presentation.tag_asset(by[f"{n}.wav"].id, "sfx", n.upper())
+    ws.editing.generate()
+    assert ws.jobs.wait_idle(60)
+    return ws

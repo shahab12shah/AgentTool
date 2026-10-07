@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import QMenu, QWidget
 
@@ -52,6 +52,7 @@ class TimelineCanvas(QWidget):
         self._drag: _Drag | None = None
         self._drop_preview: tuple[int, float, float] | None = None  # track idx, start, duration
         self._missing: set[str] = set()
+        self._wf_asked: set[str] = set()
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -179,7 +180,9 @@ class TimelineCanvas(QWidget):
         asset = project.assets.get(clip.asset_id)
         kind = asset.type if asset else AssetType.VIDEO
         color = QColor(c["clip_audio"] if kind is AssetType.AUDIO else c["clip_image"] if kind is AssetType.IMAGE else c["clip_video"])
-        if clip.kind == "text":
+        if clip.kind == "caption":
+            color = QColor("#2c8c8c")
+        elif clip.kind == "text":
             color = QColor("#7a5bbf")
         elif clip.kind == "graphic":
             color = QColor("#b9772f")
@@ -203,12 +206,19 @@ class TimelineCanvas(QWidget):
                 x += 10
             p.restore()
         label = (asset.name if asset else clip.asset_id) + (" ⚠ missing" if missing else "")
-        if clip.kind == "text" and clip.text:
+        if clip.kind == "caption" and clip.text:
+            label = "CC  " + str(clip.text.get("text", ""))
+        elif clip.kind == "text" and clip.text:
             label = "T  " + str(clip.text.get("content", ""))
         elif clip.kind == "graphic":
             label = "▭ highlight"
-        decision = project.editing_decisions.get(clip.ai_decision_id) if clip.ai_decision_id else None
+        decision = (project.editing_decisions.get(clip.ai_decision_id) or project.presentation_decisions.get(clip.ai_decision_id)) if clip.ai_decision_id else None
+        if track.is_audio and clip.kind == "media" and asset is not None:
+            self._paint_waveform(p, r, clip, asset, track)
         tags = []
+        role = clip.audio.get("role")
+        if role in ("MUSIC", "SFX"):
+            tags.append("♪" if role == "MUSIC" else "SFX")
         if clip.created_by == "AI":
             tags.append("AI")
         elif clip.created_by == "USER" and clip.scene_id:
@@ -225,6 +235,42 @@ class TimelineCanvas(QWidget):
         p.drawText(r.adjusted(6, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                    fm.elidedText(label, Qt.TextElideMode.ElideRight, int(r.width()) - 10))
         p.restore()
+
+    def _paint_waveform(self, p: QPainter, r: QRectF, clip: Clip, asset, track) -> None:
+        """Waveform of the clip's source range (cached peaks, generated in a background job). Clipped buckets are drawn red."""
+        try:
+            wf = self.ctx.ws.presentation.waveform(asset.id, request=False)
+            if wf is None:
+                if asset.id not in self._wf_asked:  # starting a job inside a paint event would re-enter the UI: defer it
+                    self._wf_asked.add(asset.id)
+                    QTimer.singleShot(0, lambda aid=asset.id: self.ctx.ws.presentation.waveform(aid))
+                return
+            if r.width() < 3:
+                return
+            n = max(1, min(4000, int(r.width() // 2)))
+            rows = wf.range(clip.source_in, clip.source_out, n)
+        except Exception:  # a waveform problem must never break painting
+            return
+        mid, half = r.center().y(), (r.height() - 6) / 2
+        vol = float(clip.audio.get("volume", 1.0)) * track.volume
+        p.save()
+        try:
+            p.setClipRect(r)
+            analysis = self.ctx.ws.project.audio_analysis if self.ctx.ws.project else None
+            if analysis is not None and asset.id == analysis.asset_id and clip.audio.get("role") == "VOICE":
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(255, 255, 255, 38))  # silence regions
+                for a, b in analysis.silence_regions:
+                    x0, x1 = r.left() + (a - clip.source_in) / clip.speed * self.pps, r.left() + (b - clip.source_in) / clip.speed * self.pps
+                    if x1 > r.left() and x0 < r.right():
+                        p.drawRect(QRectF(max(x0, r.left()), r.top(), min(x1, r.right()) - max(x0, r.left()), r.height()))
+            step = r.width() / n
+            for k, (mn, mx, clipped) in enumerate(rows):
+                x = r.left() + k * step
+                p.setPen(QPen(QColor("#ff4d4d") if clipped else QColor(255, 255, 255, 170), 1))
+                p.drawLine(QPointF(x, mid - min(1.0, abs(mx) * vol) * half), QPointF(x, mid + min(1.0, abs(mn) * vol) * half))
+        finally:
+            p.restore()
 
     # ------------------------------------------------------------ hit testing
     def _hit_clip(self, x: float, y: float) -> tuple[Clip, int, str] | None:

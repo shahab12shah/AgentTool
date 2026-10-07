@@ -38,12 +38,13 @@ from app.ui.script_panel import ScriptPanel
 from app.ui.theme import stylesheet
 from app.ui.timeline_panel import TimelinePanel
 from app.ui.ai_edit_panel import AIEditPanel
+from app.ui.presentation_panel import PresentationPanel
 from app.ui.review_panel import ReviewPanel
 from app.ui.scene_panel import ScenePanel
 from app.ui.visuals_panel import VisualsPanel
 from app.ui.voice_panel import VoicePanel
 
-NAV = ("Project", "Script", "Voice", "Scenes", "Visuals", "Review", "AI Edit", "Edit", "Timeline", "Export")
+NAV = ("Project", "Script", "Voice", "Scenes", "Visuals", "Review", "AI Edit", "Audio & Captions", "Edit", "Timeline", "Export")
 PLACEHOLDERS = {  # name -> (badge, description)
     "Edit": ("Coming in a later phase", "Caption rendering, audio mixing, music/SFX libraries and final export are planned for later phases."),
 }
@@ -97,6 +98,7 @@ class MainWindow(QMainWindow):
         self.review_panel = ReviewPanel(ctx)
         self.ai_edit_panel = AIEditPanel(ctx, self.voice_panel.player)
         self.ai_edit_panel.go_to_research = self._research_scene
+        self.presentation_panel = PresentationPanel(ctx, self.voice_panel.player)
         self.export_panel = ExportPanel(ctx)
         self.project_view = ProjectView(ctx)
         self.jobs_panel = JobsPanel(ctx)
@@ -205,6 +207,7 @@ class MainWindow(QMainWindow):
             "Visuals": self.visuals_panel,
             "Review": self.review_panel,
             "AI Edit": self.ai_edit_panel,
+            "Audio & Captions": self.presentation_panel,
             "Timeline": timeline_page,
             "Export": self.export_panel,
         }
@@ -304,12 +307,15 @@ class MainWindow(QMainWindow):
         self.voice_panel.pause()
         self.scene_panel.pause()
         self.ai_edit_panel.pause()
+        self.presentation_panel.pause()
         self.pages.setCurrentIndex(row)
         self._place_shared(name)
         if name == "Review":
             self.review_panel.refresh()
         if name == "AI Edit":
             self.ai_edit_panel.refresh()
+        if name == "Audio & Captions":
+            self.presentation_panel.refresh()
         if name == "Export":
             self.export_panel.check()
 

@@ -456,7 +456,7 @@ def test_phase1_project_files_migrate_to_schema_2(project_ws):
     ws.close_project()
     ws.open_project(root)
     p = ws.project
-    assert p.schema_version == 4 and p.scenes == [] and p.transcription.transcript is None
+    assert p.schema_version == 5 and p.scenes == [] and p.transcription.transcript is None
     assert p.visual_preferences.min_accuracy_score == 85
     ws.save()
-    assert json.loads((root / "project.json").read_text())["schema_version"] == 4
+    assert json.loads((root / "project.json").read_text())["schema_version"] == 5

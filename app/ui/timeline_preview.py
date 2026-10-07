@@ -81,6 +81,8 @@ class TimelinePreview(QWidget):
                 self._paint_highlight(p, layer, r)
             elif layer.kind == "text":
                 self._paint_text(p, layer, r, k)
+            elif layer.kind == "caption":
+                self._paint_caption(p, layer, r, project)
         p.restore()
         p.setPen(QPen(QColor("#2b3140"), 1))
         p.drawRect(r)
@@ -127,7 +129,7 @@ class TimelinePreview(QWidget):
 
     def _paint_text(self, p: QPainter, layer: Layer, r: QRectF, k: float) -> None:
         t = layer.text or {}
-        content = str(t.get("content", ""))
+        content = layer.counter_text or str(t.get("content", ""))
         if not content:
             return
         pos = t.get("position", (0.5, 0.5))
@@ -147,3 +149,71 @@ class TimelinePreview(QWidget):
         p.setPen(QColor(STYLE_COLORS.get(str(t.get("style")), "#ffffff")))
         p.drawText(QPointF(left, cy + fm.ascent() / 2 - 2), content)
         p.restore()
+
+    def _paint_caption(self, p: QPainter, layer: Layer, r: QRectF, project) -> None:
+        """A caption with its style, safe-area position and word-level highlight (progressive reveal or highlight)."""
+        from app.captions.styles import effective_style, style_for
+
+        d = layer.text or {}
+        cs = project.caption_settings
+        st = effective_style(style_for(project.caption_styles, d.get("style_id", cs.style_id)), cs, d.get("style_overrides"))
+        lines = d.get("lines") or [d.get("text", "")]
+        words = d.get("words", [])
+        mode = d.get("highlight_mode", cs.highlight_mode)
+        cur = layer.word_index
+        font = QFont(st.font)
+        font.setPixelSize(max(8, int(st.size_rel * r.height())))
+        font.setBold(st.weight == "bold")
+        p.save()
+        p.setOpacity(max(0.0, min(1.0, layer.opacity * st.opacity)))
+        p.setFont(font)
+        fm = p.fontMetrics()
+        marks = {m["word_index"]: m for m in d.get("emphasis", [])}
+        # word positions across the lines
+        idx = 0
+        shown: list[list[tuple[str, int]]] = []
+        for line in lines:
+            toks = line.split()
+            shown.append([(tok, idx + i) for i, tok in enumerate(toks)])
+            idx += len(toks)
+        up = st.uppercase
+        lh = fm.height() * st.line_spacing
+        total_h = lh * len(lines)
+        pos = d.get("position", cs.position)
+        xy = d.get("position_xy") or []
+        cx = r.left() + (xy[0] if pos == "custom" and len(xy) == 2 else 0.5) * r.width()
+        if pos == "top":
+            top = r.top() + cs.safe_margin_top * r.height()
+        elif pos == "center":
+            top = r.center().y() - total_h / 2
+        elif pos == "custom" and len(xy) == 2:
+            top = r.top() + xy[1] * r.height() - total_h / 2
+        else:
+            top = r.bottom() - cs.safe_margin_bottom * r.height() - total_h
+        widths = [sum(fm.horizontalAdvance((t.upper() if up else t) + " ") for t, _ in ln) for ln in shown]
+        if st.background == "box" and widths:
+            bw = max(widths) + 24
+            p.fillRect(QRectF(cx - bw / 2, top - 6, bw, total_h + 12), QColor(int(st.background_color[1:3], 16), int(st.background_color[3:5], 16), int(st.background_color[5:7], 16),
+                                                                                int(255 * st.background_opacity)))
+        for li, ln in enumerate(shown):
+            x = cx - widths[li] / 2
+            y = top + li * lh + fm.ascent()
+            for tok, wi in ln:
+                text = tok.upper() if up else tok
+                if mode == "PROGRESSIVE" and wi > cur:
+                    x += fm.horizontalAdvance(text + " ")
+                    continue
+                color = QColor(st.color)
+                m = marks.get(wi)
+                if (mode == "HIGHLIGHT" and wi == cur) or m:
+                    color = QColor(st.highlight_color)
+                if st.shadow:
+                    p.setPen(QColor(0, 0, 0, 160))
+                    p.drawText(QPointF(x + 2, y + 2), text)
+                p.setPen(color)
+                p.drawText(QPointF(x, y), text)
+                if m and m.get("style") == "UNDERLINE":
+                    p.drawLine(QPointF(x, y + 3), QPointF(x + fm.horizontalAdvance(text), y + 3))
+                x += fm.horizontalAdvance(text + " ")
+        p.restore()
+        _ = words

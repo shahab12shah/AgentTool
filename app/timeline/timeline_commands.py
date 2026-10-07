@@ -81,6 +81,7 @@ _FLAG_TEXT = {
     "hidden": ("Hide track", "Show track"),
     "muted": ("Mute track", "Unmute track"),
     "locked": ("Lock track", "Unlock track"),
+    "solo": ("Solo track", "Unsolo track"),
 }
 
 
@@ -90,7 +91,7 @@ class SetTrackFlagCommand(_TimelineCommand):
     major = False
 
     def __init__(self, timeline: Timeline, track_id: str, flag: str, value: bool) -> None:
-        if flag not in ("hidden", "muted", "locked"):
+        if flag not in ("hidden", "muted", "locked", "solo"):
             raise ValueError(flag)
         super().__init__(timeline)
         self.track_id, self.flag, self.value = track_id, flag, value
@@ -104,6 +105,29 @@ class SetTrackFlagCommand(_TimelineCommand):
 
     def undo(self) -> None:
         setattr(self.timeline.get_track(self.track_id), self.flag, self._old)
+
+
+class SetTrackVolumeCommand(_TimelineCommand):
+    """Track gain (audio tracks), 0..2 linear."""
+
+    description = "Change track volume"
+    major = False
+    merge_key = None
+
+    def __init__(self, timeline: Timeline, track_id: str, volume: float) -> None:
+        super().__init__(timeline)
+        if not (0.0 <= volume <= 2.0):
+            raise TimelineError("Track volume must be between 0 and 200%.")
+        self.track_id, self.volume = track_id, volume
+        self._old = 1.0
+
+    def do(self) -> None:
+        track = self.timeline.get_track(self.track_id)
+        self._old = track.volume
+        track.volume = self.volume
+
+    def undo(self) -> None:
+        self.timeline.get_track(self.track_id).volume = self._old
 
 
 # ---------------------------------------------------------------- clips

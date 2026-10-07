@@ -27,6 +27,8 @@ class Track:
     hidden: bool = False
     muted: bool = False
     locked: bool = False
+    solo: bool = False
+    volume: float = 1.0  # audio tracks: track gain
     clips: list[Clip] = field(default_factory=list)
 
     @property
@@ -52,6 +54,8 @@ class Track:
             "hidden": self.hidden,
             "muted": self.muted,
             "locked": self.locked,
+            **({"solo": True} if self.solo else {}),
+            **({"volume": self.volume} if abs(self.volume - 1.0) > 1e-9 else {}),
             "clips": [c.to_dict() for c in self.clips],
         }
 
@@ -64,6 +68,8 @@ class Track:
             hidden=bool(d.get("hidden", False)),
             muted=bool(d.get("muted", False)),
             locked=bool(d.get("locked", False)),
+            solo=bool(d.get("solo", False)),
+            volume=float(d.get("volume", 1.0)),
             clips=[Clip.from_dict(c) for c in d.get("clips", [])],
         )
         track.sort()

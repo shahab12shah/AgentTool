@@ -6,9 +6,9 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-PROPERTIES = ("position_x", "position_y", "scale", "rotation", "opacity", "volume", "blur")
+PROPERTIES = ("position_x", "position_y", "scale", "rotation", "opacity", "volume", "blur", "reveal")
 INTERPOLATIONS = ("linear", "ease_in", "ease_out", "ease_in_out")
-DEFAULTS = {"position_x": 0.0, "position_y": 0.0, "scale": 1.0, "rotation": 0.0, "opacity": 1.0, "volume": 1.0, "blur": 0.0}
+DEFAULTS = {"position_x": 0.0, "position_y": 0.0, "scale": 1.0, "rotation": 0.0, "opacity": 1.0, "volume": 1.0, "blur": 0.0, "reveal": 1.0}
 
 
 @dataclass

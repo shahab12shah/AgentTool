@@ -191,7 +191,7 @@ class TimelineAssemblyService:
                                               sc.visual_status, generated_at=now_iso())
             return
         tl = st.timeline
-        scene_clips = [(t, c) for t in tl.tracks for c in t.clips if c.scene_id == sid]
+        scene_clips = [(t, c) for t in tl.tracks for c in t.clips if c.scene_id == sid and c.metadata.get("phase") != 5]  # presentation layer clips are Phase 5's
         preserved = [c for _t, c in scene_clips if c.locked or c.created_by == Creator.USER.value]
         for t, c in scene_clips:
             if c not in preserved and c.created_by == Creator.AI.value:

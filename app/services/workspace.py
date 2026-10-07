@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from app.ai.provider import AIProviderRegistry
-from app.core.commands import Command, CommandStack
+from app.core.commands import Command, CommandStack, CompositeCommand
 from app.core.config import Settings, SettingsStore
 from app.core.constants import DEFAULT_ASPECT_RATIO, DEFAULT_FPS, DEFAULT_RESOLUTION, resolve_dimensions
 from app.core.events import EventBus, Topics
@@ -38,6 +38,7 @@ from app.visual.preferences import VisualPreferences
 from app.visual.research import VisualResearchService
 from app.services.research_service import ResearchService
 from app.services.editing_service import EditingService
+from app.services.presentation_service import PresentationService
 from app.project.phase2_commands import SetVisualPreferencesCommand
 from app.storage.paths import AppPaths
 
@@ -75,10 +76,19 @@ class Workspace:
                                                          self.media, self.importer, lambda: self.settings)
         self.editing = EditingService(self.projects, self.commands, self.jobs, self.bus, self.apply_command,
                                       lambda pid: self.paths.data_dir / "checkpoints" / pid)
-        self.timeline.edit_hook = self.editing.override_command
+        self.presentation = PresentationService(self.projects, self.commands, self.jobs, self.bus, self.apply_command, lambda: self.settings.ffmpeg_path,
+                                                self.media, self.editing._checkpoint)
+        self.timeline.edit_hook = self._edit_hook
         self.selected_clip_id: str | None = None
 
         self.bus.subscribe(Topics.PROJECT_CHANGED, self._on_project_changed)
+
+    def _edit_hook(self, clip_id: str, action: str) -> Command | None:
+        """Manual timeline edits take ownership of AI-created objects (AI edit decisions and presentation decisions)."""
+        cmds = [c for c in (self.editing.override_command(clip_id, action), self.presentation.override_command(clip_id, action)) if c is not None]
+        if not cmds:
+            return None
+        return cmds[0] if len(cmds) == 1 else CompositeCommand("Take ownership", cmds, scope="timeline")
 
     # ------------------------------------------------------------ state
     @property

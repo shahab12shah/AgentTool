@@ -206,9 +206,10 @@ class TextPlanner:
                     dur = s.end - start
             if dur < 0.6:
                 return
-            if out and start < out[-1].graphic.start + out[-1].graphic.duration - 1e-6:
-                start = out[-1].graphic.start + out[-1].graphic.duration + 0.05  # one text at a time on the text track
-                if start + 0.9 > s.end:
+            clash = next((o for o in out if start < o.graphic.start + o.graphic.duration - 1e-6 and start + dur > o.graphic.start + 1e-6), None)
+            if clash is not None:  # one text at a time on the text track: shift after the one in the way, or drop
+                start = clash.graphic.start + clash.graphic.duration + 0.05
+                if start + 0.9 > s.end or any(start < o.graphic.start + o.graphic.duration - 1e-6 and start + 0.9 > o.graphic.start + 1e-6 for o in out):
                     return
                 dur = min(dur, s.end - start)
             positions = {TextStyle.NUMBER_CARD: (0.5, 0.42), TextStyle.LOWER_THIRD: (0.08, 0.80), TextStyle.HEADLINE: (0.5, 0.14),
@@ -265,6 +266,7 @@ class TextPlanner:
                     phrase = " ".join(claim.text.replace("’", "'").split()[:6]).strip(".,;:")
                     add(phrase, None, TextStyle.HEADLINE, Emphasis.PUNCH_TEXT, DecisionType.TEXT, "transcript",
                         "Key claim of an important scene gets on-screen emphasis.", brief.importance, 78, lead=0.0, min_dur=2.2)
+        out.sort(key=lambda t: t.graphic.start)
         return out
 
 

@@ -40,6 +40,20 @@ from app.editing.models import (
     OverrideRecord,
     TimelineGeneration,
 )
+from app.presentation.models import (
+    AudioSettings,
+    CaptionSettings,
+    CaptionStyle,
+    DuckingEvent,
+    PresentationDecision,
+    PresentationGeneration,
+    PresentationOverride,
+    PresentationSession,
+    ScenePresentationPlan,
+    VoiceAnalysis,
+    VoiceProcessingSettings,
+)
+from app.presentation import exports
 from app.storage.paths import ProjectPaths
 from app.transcription.alignment import ScriptAlignment
 from app.transcription.models import TranscriptionState
@@ -88,6 +102,19 @@ class Project:
     timeline_generation: TimelineGeneration = field(default_factory=TimelineGeneration)
     ai_overrides: list[OverrideRecord] = field(default_factory=list)
     timeline_version: int = 0
+    # Phase 5: professional audio, captions and graphics
+    audio_settings: AudioSettings = field(default_factory=AudioSettings)
+    audio_analysis: VoiceAnalysis | None = None
+    audio_processing: VoiceProcessingSettings = field(default_factory=VoiceProcessingSettings)
+    ducking_events: list[DuckingEvent] = field(default_factory=list)
+    caption_settings: CaptionSettings = field(default_factory=CaptionSettings)
+    caption_styles: dict[str, CaptionStyle] = field(default_factory=dict)  # edited/custom styles (built-in presets live in code)
+    keyword_emphasis: dict[str, list[dict[str, Any]]] = field(default_factory=dict)  # scene id -> detected keywords
+    presentation_plans: dict[str, ScenePresentationPlan] = field(default_factory=dict)
+    presentation_decisions: dict[str, PresentationDecision] = field(default_factory=dict)
+    presentation_overrides: list[PresentationOverride] = field(default_factory=list)
+    presentation_generation: PresentationGeneration = field(default_factory=PresentationGeneration)
+    presentation_sessions: list[PresentationSession] = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION
     application_version: str = APP_VERSION
     # Runtime-only state (never serialised):
@@ -238,6 +265,23 @@ class Project:
             "timeline_generation": to_plain(self.timeline_generation),
             "ai_overrides": to_plain(self.ai_overrides),
             "timeline_version": self.timeline_version,
+            "audio_settings": to_plain(self.audio_settings),
+            "audio_analysis": to_plain(self.audio_analysis) if self.audio_analysis else {},
+            "audio_processing": to_plain(self.audio_processing),
+            "music_assignments": to_plain(exports.music_assignments(self)),  # derived (see presentation/exports.py)
+            "sfx_assignments": to_plain(exports.sfx_assignments(self)),  # derived
+            "ducking_events": to_plain(self.ducking_events),
+            "caption_settings": to_plain(self.caption_settings),
+            "caption_segments": exports.caption_segments(self),  # derived
+            "caption_styles": to_plain(self.caption_styles),
+            "keyword_emphasis": to_plain(self.keyword_emphasis),
+            "text_graphics": exports.text_graphics(self),  # derived
+            "motion_graphics": exports.motion_graphics(self),  # derived
+            "presentation_plans": to_plain(self.presentation_plans),
+            "presentation_decisions": {k: v.to_dict() for k, v in self.presentation_decisions.items()},
+            "presentation_overrides": to_plain(self.presentation_overrides),
+            "presentation_generation": to_plain(self.presentation_generation),
+            "presentation_sessions": to_plain(self.presentation_sessions[-50:]),
             "counters": {"asset": self.assets.counter},
         }
 
@@ -276,6 +320,18 @@ class Project:
                 timeline_generation=from_plain(TimelineGeneration, doc["timeline_generation"]) if doc["timeline_generation"] else TimelineGeneration(),
                 ai_overrides=[from_plain(OverrideRecord, v) for v in doc["ai_overrides"]],
                 timeline_version=int(doc["timeline_version"]),
+                audio_settings=from_plain(AudioSettings, doc["audio_settings"]) if doc["audio_settings"] else AudioSettings(),
+                audio_analysis=from_plain(VoiceAnalysis, doc["audio_analysis"]) if doc["audio_analysis"] else None,
+                audio_processing=from_plain(VoiceProcessingSettings, doc["audio_processing"]) if doc["audio_processing"] else VoiceProcessingSettings(),
+                ducking_events=[from_plain(DuckingEvent, v) for v in doc["ducking_events"]],
+                caption_settings=from_plain(CaptionSettings, doc["caption_settings"]) if doc["caption_settings"] else CaptionSettings(),
+                caption_styles={k: from_plain(CaptionStyle, v) for k, v in doc["caption_styles"].items()},
+                keyword_emphasis={k: list(v) for k, v in doc["keyword_emphasis"].items()},
+                presentation_plans={k: from_plain(ScenePresentationPlan, v) for k, v in doc["presentation_plans"].items()},
+                presentation_decisions={k: PresentationDecision.from_dict(v) for k, v in doc["presentation_decisions"].items()},
+                presentation_overrides=[from_plain(PresentationOverride, v) for v in doc["presentation_overrides"]],
+                presentation_generation=from_plain(PresentationGeneration, doc["presentation_generation"]) if doc["presentation_generation"] else PresentationGeneration(),
+                presentation_sessions=[from_plain(PresentationSession, v) for v in doc["presentation_sessions"]],
                 assets=AssetRegistry(
                     [Asset.from_dict(a) for a in doc["assets"]], counter=int((doc.get("counters") or {}).get("asset", 0))
                 ),

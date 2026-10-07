@@ -22,6 +22,7 @@ from app.timeline.timeline_commands import (
     SplitClipCommand,
     SetClipPropertiesCommand,
     SetTrackFlagCommand,
+    SetTrackVolumeCommand,
     TrimClipCommand,
 )
 from app.timeline.track import Track, TrackKind
@@ -70,6 +71,9 @@ class TimelineService:
 
     def set_track_flag(self, track_id: str, flag: str, value: bool) -> None:
         self._commands.execute(SetTrackFlagCommand(self.timeline, track_id, flag, value))
+
+    def set_track_volume(self, track_id: str, volume: float) -> None:
+        self._commands.execute(SetTrackVolumeCommand(self.timeline, track_id, volume))
 
     # ----- clips -----
     def default_track_for(self, asset: Asset) -> Track:

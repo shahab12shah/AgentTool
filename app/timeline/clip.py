@@ -8,7 +8,7 @@ from typing import Any
 
 from app.timeline.keyframes import Keyframe
 
-KIND_MEDIA, KIND_TEXT, KIND_GRAPHIC = "media", "text", "graphic"
+KIND_MEDIA, KIND_TEXT, KIND_GRAPHIC, KIND_CAPTION = "media", "text", "graphic", "caption"
 
 
 @dataclass
@@ -26,7 +26,7 @@ class Clip:
     opacity: float = 1.0
     speed: float = 1.0
     # --- Phase 4: AI-assembled timeline metadata (all optional; plain clips ignore them) ---
-    kind: str = KIND_MEDIA  # "media" | "text" | "graphic" (text/graphic clips have no asset)
+    kind: str = KIND_MEDIA  # "media" | "text" | "graphic" | "caption" (non-media clips have no asset)
     scene_id: str = ""
     slot: str = ""  # role inside the scene ("visual:0", "text:1"...): what regeneration matches on
     created_by: str = "USER"  # AI | USER | SYSTEM

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QCheckBox, QDoubleSpinBox, QFormLayout, QGroupBox, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QDoubleSpinBox, QFormLayout, QGroupBox, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from app.core.constants import MIN_CLIP_DURATION
 from app.timeline.clip import Clip
@@ -86,10 +86,28 @@ class InspectorPanel(QWidget):
         f4.addWidget(self.ai_lock)
         self.ai_lock.clicked.connect(self._toggle_lock)
 
+        # Presentation object (Phase 5): caption, graphic, music or sound effect
+        self.pres_info = QLabel()
+        self.pres_info.setWordWrap(True)
+        self.pres_info.setTextFormat(Qt.TextFormat.RichText)
+        self.pres_text = QLineEdit()
+        self.pres_volume = _spin(0, 400, 5, 0, " %")
+        self.pres_apply = QPushButton("Apply")
+        self.pres_lock = QCheckBox("Locked (protected from regeneration)")
+        self.pres_box = QGroupBox("Presentation object")
+        f5 = QFormLayout(self.pres_box)
+        f5.addRow(self.pres_info)
+        f5.addRow("Text", self.pres_text)
+        f5.addRow("Volume", self.pres_volume)
+        f5.addRow(self.pres_apply)
+        f5.addRow(self.pres_lock)
+        self.pres_apply.clicked.connect(self._apply_pres)
+        self.pres_lock.clicked.connect(lambda on: self._run(lambda: self.ctx.ws.presentation.lock_clip(self._clip_id, on)) if self._clip_id else None)
+
         self.body = QWidget()
         body = QVBoxLayout(self.body)
         body.setContentsMargins(0, 0, 0, 0)
-        for box in (clip_box, self.ai_box, timing, transform):
+        for box in (clip_box, self.pres_box, self.ai_box, timing, transform):
             body.addWidget(box)
         body.addStretch(1)
         layout = QVBoxLayout(self)
@@ -131,7 +149,11 @@ class InspectorPanel(QWidget):
         asset = project.assets.get(clip.asset_id)
         track = project.timeline.get_track(clip.track_id)
         d = project.editing_decisions.get(clip.ai_decision_id) if clip.ai_decision_id else None
-        self.ai_box.setVisible(bool(clip.scene_id or d))
+        desc = self.ctx.ws.presentation.describe(clip.id)
+        self.pres_box.setVisible(desc is not None)
+        if desc is not None:
+            self._show_pres(desc)
+        self.ai_box.setVisible(bool(clip.scene_id or d) and desc is None)
         if self.ai_box.isVisible():
             self.ai_info.setText(
                 (f"<b>{d.type.value.replace('_', ' ').title()}</b> — {d.confidence:.0f}% · created by {d.created_by.value}<br><i>“{d.reason}”</i>" if d else
@@ -161,6 +183,52 @@ class InspectorPanel(QWidget):
             widget.blockSignals(False)
         for w in (self.start, self.duration, self.pos_x, self.pos_y, self.scale, self.rotation, self.opacity, self.speed):
             w.setEnabled(not track.locked)
+
+    def _show_pres(self, d: dict) -> None:
+        kind = d["kind"]
+        rows = [f"<b>{kind.title()}</b> — created by {d['created_by']}" + (f" · {d['confidence']:.0f}%" if d["confidence"] is not None else "")]
+        if kind == "CAPTION":
+            rows += [f"Start {d['start']:.2f}s · End {d['end']:.2f}s", f"Font {d['font']} · Size {d['size_pct']}% · {d['weight']}",
+                     f"Style {d['style_id']} · Position {d['position']} · Highlight {d['highlight_mode']}",
+                     f"Animation: {', '.join(str(v.get('preset')) for v in d['animation'].values() if isinstance(v, dict)) or '—'}"]
+        elif kind in ("GRAPHIC", "EVIDENCE"):
+            t = d["text"] or {}
+            rows += [f"Start {d['start']:.2f}s · End {d['end']:.2f}s", f"Type {t.get('variant', kind)} · Style {t.get('style', '—')}",
+                     f"Animation: {', '.join(str(v.get('preset')) for v in d['animation'].values() if isinstance(v, dict)) or '—'}"]
+        else:
+            rows += [f"Asset {d['asset']}", f"Start {d['start']:.2f}s · End {d['end']:.2f}s", f"Fade in {d['fade_in']:.2f}s · out {d['fade_out']:.2f}s"
+                     + (f" · {len(d['keyframes'])} ducking keyframes" if kind == "MUSIC" else f" · {d['category']}")]
+        if d["reason"]:
+            rows.append(f"<i>Reason: “{d['reason']}”</i>")
+        self.pres_info.setText("<br>".join(rows))
+        texty = kind in ("CAPTION", "GRAPHIC")
+        self.pres_text.setVisible(texty)
+        self.pres_volume.setVisible(kind in ("MUSIC", "SFX"))
+        if texty:
+            self.pres_text.setText(d["text"] if kind == "CAPTION" else str((d["text"] or {}).get("content", "")))
+        else:
+            self.pres_volume.blockSignals(True)
+            self.pres_volume.setValue(float(d.get("volume", 1.0)) * 100)
+            self.pres_volume.blockSignals(False)
+        self.pres_lock.blockSignals(True)
+        self.pres_lock.setChecked(d["locked"])
+        self.pres_lock.blockSignals(False)
+        self.pres_apply.setVisible(kind != "EVIDENCE")
+
+    def _apply_pres(self) -> None:
+        clip = self._current()
+        d = self.ctx.ws.presentation.describe(clip.id) if clip else None
+        if d is None:
+            return
+        svc = self.ctx.ws.presentation
+        if d["kind"] == "CAPTION":
+            self._run(lambda: svc.update_caption(clip.id, text=self.pres_text.text()))
+        elif d["kind"] == "GRAPHIC":
+            self._run(lambda: svc.update_graphic(clip.id, content=self.pres_text.text()))
+        elif d["kind"] == "MUSIC" and d["assignment_id"]:
+            self._run(lambda: svc.set_music(d["assignment_id"], volume=self.pres_volume.value() / 100))
+        elif d["kind"] in ("MUSIC", "SFX"):
+            self._run(lambda: svc.set_clip_audio(clip.id, volume=self.pres_volume.value() / 100))
 
     def _toggle_lock(self, on: bool) -> None:
         clip = self._current()

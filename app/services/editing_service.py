@@ -290,7 +290,7 @@ class EditingService:
     @staticmethod
     def _drop_orphans(state: EditState, valid: set[str]) -> None:
         for t in state.timeline.tracks:
-            t.clips = [c for c in t.clips if not (c.scene_id and c.scene_id not in valid and c.created_by == "AI" and not c.locked)]
+            t.clips = [c for c in t.clips if not (c.scene_id and c.scene_id not in valid and c.created_by == "AI" and not c.locked and c.metadata.get("phase") != 5)]
         for did in [k for k, d in state.decisions.items() if d.scene_id and d.scene_id not in valid and d.created_by is Creator.AI]:
             del state.decisions[did]
 
