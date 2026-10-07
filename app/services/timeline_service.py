@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from app.core.commands import CommandStack
+from typing import Callable
+
+from app.core.commands import Command, CommandStack, CompositeCommand
 from app.core.constants import DEFAULT_IMAGE_DURATION
 from app.core.exceptions import TimelineError
 from app.media.asset import Asset, AssetType
@@ -17,6 +19,7 @@ from app.timeline.timeline_commands import (
     MoveClipCommand,
     RemoveTrackCommand,
     RenameTrackCommand,
+    SplitClipCommand,
     SetClipPropertiesCommand,
     SetTrackFlagCommand,
     TrimClipCommand,
@@ -28,6 +31,12 @@ class TimelineService:
     def __init__(self, projects: ProjectManager, commands: CommandStack) -> None:
         self._projects = projects
         self._commands = commands
+        # Phase 4: returns a command that records the user's takeover of an AI-created clip (executed in the same undo step)
+        self.edit_hook: Callable[[str, str], Command | None] | None = None
+
+    def _execute(self, command: Command, clip_id: str | None = None, action: str = "edit") -> None:
+        extra = self.edit_hook(clip_id, action) if (self.edit_hook and clip_id) else None
+        self._commands.execute(command if extra is None else CompositeCommand(command.description, [command, extra], scope="timeline"))
 
     def _project(self) -> Project:
         if self._projects.current is None:
@@ -101,21 +110,25 @@ class TimelineService:
         if new_track_id is not None:
             track = project.timeline.get_track(new_track_id)
             _, clip = project.timeline.find_clip(clip_id)
-            if not track.accepts(project.assets.require(clip.asset_id).type):
+            if clip.kind == "media" and not track.accepts(project.assets.require(clip.asset_id).type):
                 raise TimelineError(f"Track “{track.name}” cannot hold that kind of media.")
-        self._commands.execute(MoveClipCommand(project.timeline, clip_id, new_start, new_track_id))
+        self._execute(MoveClipCommand(project.timeline, clip_id, new_start, new_track_id), clip_id)
 
     def trim_clip(self, clip_id: str, *, new_start: float | None = None, new_end: float | None = None) -> None:
         project = self._project()
         _, clip = project.timeline.find_clip(clip_id)
-        asset = project.assets.require(clip.asset_id)
-        max_source = None if asset.type is AssetType.IMAGE else asset.duration
-        self._commands.execute(
-            TrimClipCommand(project.timeline, clip_id, new_start=new_start, new_end=new_end, max_source=max_source)
-        )
+        asset = project.assets.get(clip.asset_id) if clip.kind == "media" else None
+        max_source = None if asset is None or asset.type is AssetType.IMAGE else asset.duration
+        self._execute(TrimClipCommand(project.timeline, clip_id, new_start=new_start, new_end=new_end, max_source=max_source), clip_id)
 
     def delete_clip(self, clip_id: str) -> None:
-        self._commands.execute(DeleteClipCommand(self.timeline, clip_id))
+        self._execute(DeleteClipCommand(self.timeline, clip_id), clip_id, "delete")
+
+    def split_clip(self, clip_id: str, at: float) -> Clip:
+        """Split a clip at ``at`` (timeline seconds). Returns the new right-hand clip."""
+        new_id = new_clip_id()
+        self._execute(SplitClipCommand(self.timeline, clip_id, at, new_id), clip_id)
+        return self.timeline.find_clip(new_id)[1]
 
     def set_clip_properties(self, clip_id: str, **changes: object) -> None:
-        self._commands.execute(SetClipPropertiesCommand(self.timeline, clip_id, **changes))
+        self._execute(SetClipPropertiesCommand(self.timeline, clip_id, **changes), clip_id)

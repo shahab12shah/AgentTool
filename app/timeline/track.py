@@ -15,6 +15,7 @@ class TrackKind(str, Enum):
     IMAGE = "image"
     GRAPHICS = "graphics"
     TEXT = "text"
+    CAPTIONS = "captions"
     AUDIO = "audio"
 
 
@@ -36,7 +37,7 @@ class Track:
         """Which media can be placed here. Text tracks hold generated titles (later phase)."""
         if self.kind is TrackKind.AUDIO:
             return asset_type is AssetType.AUDIO
-        if self.kind is TrackKind.TEXT:
+        if self.kind in (TrackKind.TEXT, TrackKind.CAPTIONS):
             return False
         return asset_type in (AssetType.VIDEO, AssetType.IMAGE)
 

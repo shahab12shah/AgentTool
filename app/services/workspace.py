@@ -37,6 +37,7 @@ from app.services.transcript_service import TranscriptService
 from app.visual.preferences import VisualPreferences
 from app.visual.research import VisualResearchService
 from app.services.research_service import ResearchService
+from app.services.editing_service import EditingService
 from app.project.phase2_commands import SetVisualPreferencesCommand
 from app.storage.paths import AppPaths
 
@@ -72,6 +73,9 @@ class Workspace:
         self.scenes = SceneService(self.projects, self.commands, self.jobs, self.bus)
         self.research: ResearchService = ResearchService(self.projects, self.commands, self.jobs, self.bus, self.apply_command,
                                                          self.media, self.importer, lambda: self.settings)
+        self.editing = EditingService(self.projects, self.commands, self.jobs, self.bus, self.apply_command,
+                                      lambda pid: self.paths.data_dir / "checkpoints" / pid)
+        self.timeline.edit_hook = self.editing.override_command
         self.selected_clip_id: str | None = None
 
         self.bus.subscribe(Topics.PROJECT_CHANGED, self._on_project_changed)

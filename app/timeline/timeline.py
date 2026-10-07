@@ -22,6 +22,7 @@ DEFAULT_TRACKS: tuple[tuple[str, str, TrackKind], ...] = (
     ("track_v3", "V3 Images", TrackKind.IMAGE),
     ("track_v4", "V4 Graphics", TrackKind.GRAPHICS),
     ("track_v5", "V5 Text", TrackKind.TEXT),
+    ("track_v6", "V6 Captions", TrackKind.CAPTIONS),
     ("track_a1", "A1 Voice-over", TrackKind.AUDIO),
     ("track_a2", "A2 Music", TrackKind.AUDIO),
     ("track_a3", "A3 SFX", TrackKind.AUDIO),

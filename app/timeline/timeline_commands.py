@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.core.commands import Command
+from app.core.constants import MIN_CLIP_DURATION
 from app.core.exceptions import TimelineError
 from app.timeline.clip import Clip
 from app.timeline.timeline import Timeline
@@ -250,3 +251,57 @@ def _in_range(label: str, value: float, low: float, high: float) -> float:
     if not (low <= value <= high):
         raise TimelineError(f"{label} must be between {low:g} and {high:g}.")
     return value
+
+
+class SplitClipCommand(_TimelineCommand):
+    """Split one clip into two at ``at`` (timeline seconds). Non-destructive: both halves keep the same source media."""
+
+    description = "Split clip"
+
+    def __init__(self, timeline: Timeline, clip_id: str, at: float, new_clip_id: str) -> None:
+        super().__init__(timeline)
+        self.clip_id, self.at, self.new_clip_id = clip_id, at, new_clip_id
+        self._before: Clip | None = None
+        self._left: Clip | None = None
+        self._right: Clip | None = None
+
+    def do(self) -> None:
+        if self._left is None:
+            track, clip = self.timeline.find_clip(self.clip_id)
+            self.timeline.require_unlocked(track.id)
+            if not (clip.timeline_start + MIN_CLIP_DURATION < self.at < clip.timeline_end - MIN_CLIP_DURATION):
+                raise TimelineError("Place the playhead inside the clip (not at its very edge) to split it.")
+            before = clip.snapshot()
+            cut = self.at - clip.timeline_start
+            left, right = before.snapshot(), before.snapshot()
+            left.duration = cut
+            left.source_out = before.source_in + cut * before.speed
+            right.id, right.timeline_start, right.duration = self.new_clip_id, self.at, before.duration - cut
+            right.source_in = left.source_out
+            left.keyframes, right.keyframes = split_keyframes(before.keyframes, cut, before.duration)
+            right.transition, right.slot, right.ai_decision_id = None, (before.slot + ".r") if before.slot else "", ""
+            right.locked, right.created_by = False, "USER" if before.scene_id else before.created_by
+            self._before, self._left, self._right = before, left, right
+        self.timeline.restore_clip(self._left)
+        self.timeline.insert_clip(self._right.snapshot())
+
+    def undo(self) -> None:
+        assert self._before is not None
+        self.timeline.detach_clip(self.new_clip_id)
+        self.timeline.restore_clip(self._before)
+
+
+def split_keyframes(kfs, cut: float, duration: float):
+    """Divide keyframes at ``cut`` (clip-local seconds): the right half is shifted to start at 0 and both halves get boundary keyframes."""
+    from app.timeline.keyframes import Keyframe, value_at
+
+    left, right = [], []
+    for prop in {k.property for k in kfs}:
+        mine = sorted((k for k in kfs if k.property == prop), key=lambda k: k.time)
+        mid = value_at(mine, prop, cut)
+        interp = next((k.interpolation for k in reversed(mine) if k.time <= cut), mine[0].interpolation)
+        left += [Keyframe(k.property, k.time, k.value, k.interpolation, k.decision_id) for k in mine if k.time < cut - 1e-6]
+        left.append(Keyframe(prop, cut, mid, interp, ""))
+        right.append(Keyframe(prop, 0.0, mid, interp, ""))
+        right += [Keyframe(k.property, k.time - cut, k.value, k.interpolation, k.decision_id) for k in mine if k.time > cut + 1e-6]
+    return left, right

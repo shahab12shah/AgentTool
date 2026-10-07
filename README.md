@@ -98,6 +98,36 @@ Code lives in `research/` (Qt-free) and `services/research_service.py`; the UI i
 
 No provider other than `local_stock` was exercised against its real service. Licences shown are what the source *states*; the application never verifies rights — check licences before publishing.
 
+## Phase 4 — AI advanced editing and automatic timeline assembly
+
+```
+Script + voice-over + transcript + scenes + approved visuals + editing settings
+  -> EditingStrategyService (provider: rule-based | AI [not available yet])   video profile, SceneEditingBrief per scene
+  -> ShotTimingService     shot length from narration speed, pauses, density, complexity, importance, reading time
+  -> visual segments       one or several visuals per scene; cuts on word/sentence boundaries; reuse tracked
+  -> motion · text/number emphasis · evidence treatment · transitions · audio-ducking and caption instructions
+  -> TimelineAssemblyService  -> TimelineValidator  -> ONE undoable command  -> the normal editable timeline
+```
+
+Golden rule: **the AI creates the edit; the user owns every decision.** There is no separate AI timeline and nothing is rendered or flattened: the result is the project's real timeline (tracks V1 main, V2 B-roll, V3 images, V4 graphics, V5 text, V6 captions, A1 voice-over, A2 music, A3 SFX) plus structured decisions.
+
+* **Timeline items** (`timeline/clip.py`) gained `kind` (media/text/graphic), `scene_id`, `slot`, `created_by` (AI/USER/SYSTEM), `ai_decision_id`, `locked`, `keyframes`, `effects`, `text`, `animation`, `audio`, `transition`, `metadata`. Source media is never touched: a clip is a source range + transform + keyframes. Keyframes (`position_x/y, scale, rotation, opacity, volume, blur`; linear / ease_in / ease_out / ease_in_out) are plain data the user can edit.
+* **Decisions** (`editing/models.py`): `VISUAL_TIMING, CUT, TRIM, ZOOM, PAN, KEYFRAME, TEXT, NUMBER_EMPHASIS, EVIDENCE_FOCUS, TRANSITION, AUDIO_DUCK, CAPTION_EMPHASIS`, each with start, duration, parameters, a one-sentence reason (never chain-of-thought), confidence (≥90 High, 80–89 Good, 70–79 Review, <70 Low — low ones are marked ⚠ on the timeline) and `created_by`.
+* **Ownership.** Editing an AI element (inspector, or any normal timeline edit: move/trim/split/properties) makes it USER-owned in the same undo step: a USER decision with `overrides_decision_id` replaces the AI one, and the original is kept in `ai_overrides`. Regeneration (scene / selected / entire edit) replaces only AI-owned, unlocked elements; USER and locked ones survive, a USER zoom/transition/evidence decision is re-applied to a regenerated clip, and elements the user deleted are not re-created. Locks: visual, timing, text, motion, whole scene.
+* **Safety.** Every generation is one undo step; a checkpoint of the project is written before it (`<data dir>/checkpoints/<project>/before_ai_edit_<time>.json`, newest 10); the result is validated (`TimelineValidator`: timestamps, durations, source ranges, asset/track references, keyframes, transitions, overlaps, voice-over alignment, scene coverage) and **not committed** if it has errors; autosave covers it; cancel changes nothing.
+* **Incremental and resumable.** Per-scene input hashes: unchanged scenes are never re-analysed (plans are cached under `cache/editing/plans`); a failure at scene *N* keeps scenes 1..N-1, marks N FAILED and the rest PENDING, and *Retry* resumes at N.
+* **Missing visuals** are never invented: MISSING / UNAPPROVED / SKIPPED / MISSING_MEDIA scenes get text and audio instructions only, with Return to Research, Replace Manually and Skip.
+* **Audio and captions** are instructions only (`AUDIO_DUCK` fade-in/out, ducks on important lines and figures, modest rises in pauses; priority voice > SFX > music; `CAPTION_EMPHASIS` words and a safe region). Nothing is mixed or burned in.
+* **Presets** Documentary / Professional / Dynamic plus sliders for pacing, motion and transition frequency and toggles for text, number, evidence, transitions and ducking. Schema is now **4** (older projects migrate; the V6 captions track is added).
+* **UI**: *AI Edit* page (settings, progress "Scene 18 / 74" with the current operation, scene table, scrubbing preview, decision list and inspector with real editable parameters, locks, regenerate, retry, replace visual); AI badges, lock and low-confidence markers on the timeline; an AI box in the clip inspector; *Split at playhead* on the timeline.
+
+### What Phase 4 does not claim
+* The strategy provider is **rule-based**. `AIProvider` is an interface slot that reports itself unavailable; nothing model-based was run.
+* **Evidence regions are not detected.** The document zoom/highlight uses a default region and is flagged low-confidence (< 70%) for the user to adjust. Motion for portraits/wide photos uses the image aspect ratio only (no face or saliency detection).
+* Scoring inputs are metadata and timing; the preview shows still frames at the playhead (images, or video frames extracted on demand and cached) composed from timeline data — it is **not** a rendered or real-time playback preview, and no proxy media pipeline exists yet. Voice-over audio plays; music/SFX are not mixed.
+* Transitions are timeline data: a dissolve is previewed as a cross-fade, wipe/slide approximately. Reference-style analysis is not implemented. No FFmpeg rendering, export, caption renderer, music/SFX library or mastering.
+* Short source clips are slowed (≥ 0.8x) or restarted on a word boundary to cover the narration; such shots are marked lower-confidence.
+
 ## Status
 
 Implemented (Phase 1, see above for Phase 2): project create/open/save/save-as/close with recent list; media import (copy or link) with probing, duplicate detection and cached background thumbnails; media library (search/sort/remove/drag); script editor; voice-over import/replace/remove/playback; single-file preview; 8-track timeline with add/rename/hide/mute/lock/delete tracks and add/move/trim/delete clips (mouse, inspector, drag-drop, snapping); inspector; undo/redo; autosave + crash recovery; job manager with status bar and jobs panel; settings; logging; renderer validation/plan.
@@ -127,5 +157,5 @@ Phase 3 adds visual research, scoring, ranking, review and assignment (above). N
 - Clip transform values (position/scale/rotation/opacity) are stored and editable but not yet applied by any renderer. `Source In/Out` are read-only (changed by trimming).
 - Tests cover logic and a scripted UI workflow with synthetic mouse events; no human has used the GUI on a real display.
 
-## Next: Phase 4
-Write approved Visual Assignments onto the timeline as undoable commands (placement from the recommended duration/segment, crop hints), then the Edit page: captions, zooms/motion, transitions and audio mixing. Also: pixel-level candidate verification (vision model), validating the providers against their real services, and a model-backed `SemanticAnalyzer` and Whisper-class transcription validated on real narration.
+## Next: Phase 5
+Final rendering and export from the editable timeline (FFmpeg graph for transforms, keyframes, text/graphics and transitions), caption rendering from the caption instructions, the audio engine (music/SFX libraries, ducking and mastering from the audio instructions), real playback/proxy preview, evidence-region detection, a model-backed editing provider and validating all providers against their real services.

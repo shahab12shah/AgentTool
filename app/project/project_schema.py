@@ -155,6 +155,24 @@ def migrate_document(doc: dict[str, Any]) -> dict[str, Any]:
         doc.setdefault("source_metadata", {})
         doc.setdefault("research_status", {})
         doc["schema_version"] = 3
+        version = 3
+    if version == 3:  # Phase 3 -> Phase 4: additive sections; the timeline gains the V6 captions track
+        doc.setdefault("editing_settings", {})
+        doc.setdefault("editing_strategy", {})
+        doc.setdefault("editing_sessions", [])
+        doc.setdefault("editing_decisions", {})
+        doc.setdefault("timeline_generation", {})
+        doc.setdefault("ai_overrides", [])
+        doc.setdefault("timeline_version", 0)
+        tl = dict(doc.get("timeline") or {})
+        tracks = list(tl.get("tracks", []))
+        if tracks and not any(t.get("id") == "track_v6" for t in tracks):
+            at = next((i for i, t in enumerate(tracks) if t.get("kind") == "audio"), len(tracks))
+            tracks.insert(at, {"id": "track_v6", "name": "V6 Captions", "kind": "captions", "hidden": False, "muted": False,
+                               "locked": False, "clips": []})
+        tl["tracks"] = tracks
+        doc["timeline"] = tl
+        doc["schema_version"] = 4
     return doc
 
 
@@ -187,6 +205,14 @@ _V3_SECTIONS: dict[str, type] = {
     "source_metadata": dict,
     "research_status": dict,
 }
+_V4_SECTIONS: dict[str, type] = {
+    "editing_settings": dict,
+    "editing_strategy": dict,
+    "editing_sessions": list,
+    "editing_decisions": dict,
+    "timeline_generation": dict,
+    "ai_overrides": list,
+}
 
 
 def validate_document(doc: Any) -> None:
@@ -204,7 +230,7 @@ def validate_document(doc: Any) -> None:
         )
     elif version < 1:
         problems.append(f"unsupported schema_version {version}")
-    for key, typ in {**_REQUIRED_SECTIONS, **(_V2_SECTIONS if isinstance(version, int) and version >= 2 else {}), **(_V3_SECTIONS if isinstance(version, int) and version >= 3 else {})}.items():
+    for key, typ in {**_REQUIRED_SECTIONS, **(_V2_SECTIONS if isinstance(version, int) and version >= 2 else {}), **(_V3_SECTIONS if isinstance(version, int) and version >= 3 else {}), **(_V4_SECTIONS if isinstance(version, int) and version >= 4 else {})}.items():
         if key not in doc:
             problems.append(f"missing section '{key}'")
         elif not isinstance(doc[key], typ):

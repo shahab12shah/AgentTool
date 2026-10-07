@@ -109,3 +109,7 @@ class AcquisitionError(AppError):
 
 class ResearchError(AppError):
     """Visual research could not run."""
+
+
+class EditingError(AppError):
+    """The AI edit could not be created or changed."""

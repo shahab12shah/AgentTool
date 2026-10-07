@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import copy
+from dataclasses import dataclass, field
 from typing import Any
+
+from app.timeline.keyframes import Keyframe
+
+KIND_MEDIA, KIND_TEXT, KIND_GRAPHIC = "media", "text", "graphic"
 
 
 @dataclass
@@ -20,16 +25,34 @@ class Clip:
     rotation: float = 0.0  # degrees
     opacity: float = 1.0
     speed: float = 1.0
+    # --- Phase 4: AI-assembled timeline metadata (all optional; plain clips ignore them) ---
+    kind: str = KIND_MEDIA  # "media" | "text" | "graphic" (text/graphic clips have no asset)
+    scene_id: str = ""
+    slot: str = ""  # role inside the scene ("visual:0", "text:1"...): what regeneration matches on
+    created_by: str = "USER"  # AI | USER | SYSTEM
+    ai_decision_id: str = ""
+    locked: bool = False  # protected from AI regeneration
+    keyframes: list[Keyframe] = field(default_factory=list)
+    effects: dict[str, Any] = field(default_factory=dict)  # fit, focus region, highlight box...
+    text: dict[str, Any] | None = None
+    animation: dict[str, Any] = field(default_factory=dict)
+    audio: dict[str, Any] = field(default_factory=dict)
+    transition: dict[str, Any] | None = None  # transition INTO this clip
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def timeline_end(self) -> float:
         return self.timeline_start + self.duration
 
     def snapshot(self) -> "Clip":
-        return replace(self)
+        c = copy.copy(self)
+        c.keyframes = [copy.copy(k) for k in self.keyframes]
+        c.effects, c.animation, c.audio, c.metadata = (copy.deepcopy(x) for x in (self.effects, self.animation, self.audio, self.metadata))
+        c.text, c.transition = copy.deepcopy(self.text), copy.deepcopy(self.transition)
+        return c
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "clip_id": self.id,
             "track_id": self.track_id,
             "asset_id": self.asset_id,
@@ -43,6 +66,19 @@ class Clip:
             "opacity": self.opacity,
             "speed": self.speed,
         }
+        if (self.kind, self.scene_id, self.slot, self.created_by, self.ai_decision_id, self.locked) != (KIND_MEDIA, "", "", "USER", "", False):
+            d.update(kind=self.kind, scene_id=self.scene_id, slot=self.slot, created_by=self.created_by,
+                     ai_decision_id=self.ai_decision_id, locked=self.locked)
+        if self.keyframes:
+            d["keyframes"] = [k.to_dict() for k in self.keyframes]
+        for name in ("effects", "animation", "audio", "metadata"):
+            if getattr(self, name):
+                d[name] = copy.deepcopy(getattr(self, name))
+        if self.text is not None:
+            d["text"] = copy.deepcopy(self.text)
+        if self.transition is not None:
+            d["transition"] = copy.deepcopy(self.transition)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Clip":
@@ -50,7 +86,7 @@ class Clip:
         return cls(
             id=d["clip_id"],
             track_id=d["track_id"],
-            asset_id=d["asset_id"],
+            asset_id=d.get("asset_id", ""),
             timeline_start=float(d["timeline_start"]),
             duration=float(d["duration"]),
             source_in=float(d.get("source_in", 0.0)),
@@ -60,4 +96,11 @@ class Clip:
             rotation=float(d.get("rotation", 0.0)),
             opacity=float(d.get("opacity", 1.0)),
             speed=float(d.get("speed", 1.0)),
+            kind=str(d.get("kind", KIND_MEDIA)), scene_id=str(d.get("scene_id", "")), slot=str(d.get("slot", "")),
+            created_by=str(d.get("created_by", "USER")), ai_decision_id=str(d.get("ai_decision_id", "")), locked=bool(d.get("locked", False)),
+            keyframes=[Keyframe.from_dict(k) for k in d.get("keyframes", [])],
+            effects=dict(d.get("effects") or {}), text=copy.deepcopy(d["text"]) if d.get("text") is not None else None,
+            animation=dict(d.get("animation") or {}), audio=dict(d.get("audio") or {}),
+            transition=copy.deepcopy(d["transition"]) if d.get("transition") is not None else None,
+            metadata=dict(d.get("metadata") or {}),
         )

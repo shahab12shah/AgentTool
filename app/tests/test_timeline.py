@@ -24,7 +24,7 @@ def tl_ws(project_ws, media_dir):
 def test_default_tracks():
     tl = Timeline.default()
     assert [t.name for t in tl.tracks] == [
-        "V1 Main Video", "V2 B-Roll", "V3 Images", "V4 Graphics", "V5 Text", "A1 Voice-over", "A2 Music", "A3 SFX",
+        "V1 Main Video", "V2 B-Roll", "V3 Images", "V4 Graphics", "V5 Text", "V6 Captions", "A1 Voice-over", "A2 Music", "A3 SFX",
     ]
 
 
@@ -32,8 +32,8 @@ def test_add_rename_flag_delete_track_with_undo(tl_ws):
     ws = tl_ws
     n = len(ws.timeline.timeline.tracks)
     t = ws.timeline.add_track(TrackKind.VIDEO)
-    assert t.name == "V6 Video" and len(ws.timeline.timeline.tracks) == n + 1
-    assert ws.timeline.timeline.tracks.index(t) == 5  # video tracks stay above audio
+    assert t.name == "V7 Video" and len(ws.timeline.timeline.tracks) == n + 1
+    assert ws.timeline.timeline.tracks.index(t) == 6  # video tracks stay above audio
     ws.timeline.rename_track(t.id, "  Overlay ")
     assert ws.timeline.timeline.get_track(t.id).name == "Overlay"
     with pytest.raises(TimelineError):
@@ -55,7 +55,7 @@ def test_add_rename_flag_delete_track_with_undo(tl_ws):
     ws.undo()
     ws.undo()  # hidden
     ws.undo()  # rename
-    assert ws.timeline.timeline.get_track(t.id).name == "V6 Video"
+    assert ws.timeline.timeline.get_track(t.id).name == "V7 Video"
     ws.undo()  # add track
     assert len(ws.timeline.timeline.tracks) == n
 

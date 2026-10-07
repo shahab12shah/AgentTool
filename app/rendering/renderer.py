@@ -79,6 +79,8 @@ class FFmpegRenderer(Renderer):
             if track.hidden:
                 continue
             for clip in track.clips:
+                if clip.kind != "media":  # text/graphic overlays are timeline data for the future renderer
+                    continue
                 asset = project.assets.require(clip.asset_id)
                 segments.append(
                     RenderSegment(

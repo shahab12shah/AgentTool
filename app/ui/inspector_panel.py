@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QDoubleSpinBox, QFormLayout, QGroupBox, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QCheckBox, QDoubleSpinBox, QFormLayout, QGroupBox, QLabel, QVBoxLayout, QWidget
 
 from app.core.constants import MIN_CLIP_DURATION
 from app.timeline.clip import Clip
@@ -74,10 +75,21 @@ class InspectorPanel(QWidget):
         f3.addRow("Opacity", self.opacity)
         f3.addRow("Speed", self.speed)
 
+        # AI decision (Phase 4)
+        self.ai_info = QLabel()
+        self.ai_info.setWordWrap(True)
+        self.ai_info.setTextFormat(Qt.TextFormat.RichText)
+        self.ai_lock = QCheckBox("Locked (protected from AI regeneration)")
+        self.ai_box = QGroupBox("AI decision")
+        f4 = QVBoxLayout(self.ai_box)
+        f4.addWidget(self.ai_info)
+        f4.addWidget(self.ai_lock)
+        self.ai_lock.clicked.connect(self._toggle_lock)
+
         self.body = QWidget()
         body = QVBoxLayout(self.body)
         body.setContentsMargins(0, 0, 0, 0)
-        for box in (clip_box, timing, transform):
+        for box in (clip_box, self.ai_box, timing, transform):
             body.addWidget(box)
         body.addStretch(1)
         layout = QVBoxLayout(self)
@@ -118,6 +130,15 @@ class InspectorPanel(QWidget):
             return
         asset = project.assets.get(clip.asset_id)
         track = project.timeline.get_track(clip.track_id)
+        d = project.editing_decisions.get(clip.ai_decision_id) if clip.ai_decision_id else None
+        self.ai_box.setVisible(bool(clip.scene_id or d))
+        if self.ai_box.isVisible():
+            self.ai_info.setText(
+                (f"<b>{d.type.value.replace('_', ' ').title()}</b> — {d.confidence:.0f}% · created by {d.created_by.value}<br><i>“{d.reason}”</i>" if d else
+                 f"Created by {clip.created_by}") + "<br>Open the AI Edit page to change its parameters.")
+            self.ai_lock.blockSignals(True)
+            self.ai_lock.setChecked(clip.locked)
+            self.ai_lock.blockSignals(False)
         self.track_label.setText(track.name + ("  (locked)" if track.locked else ""))
         self.clip_label.setText(clip.id)
         self.asset_label.setText(f"{asset.name} ({asset.id})" if asset else clip.asset_id)
@@ -140,6 +161,11 @@ class InspectorPanel(QWidget):
             widget.blockSignals(False)
         for w in (self.start, self.duration, self.pos_x, self.pos_y, self.scale, self.rotation, self.opacity, self.speed):
             w.setEnabled(not track.locked)
+
+    def _toggle_lock(self, on: bool) -> None:
+        clip = self._current()
+        if clip:
+            self._run(lambda: self.ctx.ws.editing.lock_clip(clip.id, on))
 
     # ----- view -> model -----
     def _run(self, action) -> None:

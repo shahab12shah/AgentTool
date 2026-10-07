@@ -179,6 +179,10 @@ class TimelineCanvas(QWidget):
         asset = project.assets.get(clip.asset_id)
         kind = asset.type if asset else AssetType.VIDEO
         color = QColor(c["clip_audio"] if kind is AssetType.AUDIO else c["clip_image"] if kind is AssetType.IMAGE else c["clip_video"])
+        if clip.kind == "text":
+            color = QColor("#7a5bbf")
+        elif clip.kind == "graphic":
+            color = QColor("#b9772f")
         if track.hidden:
             color.setAlpha(80)
         elif ghost:
@@ -199,6 +203,22 @@ class TimelineCanvas(QWidget):
                 x += 10
             p.restore()
         label = (asset.name if asset else clip.asset_id) + (" ⚠ missing" if missing else "")
+        if clip.kind == "text" and clip.text:
+            label = "T  " + str(clip.text.get("content", ""))
+        elif clip.kind == "graphic":
+            label = "▭ highlight"
+        decision = project.editing_decisions.get(clip.ai_decision_id) if clip.ai_decision_id else None
+        tags = []
+        if clip.created_by == "AI":
+            tags.append("AI")
+        elif clip.created_by == "USER" and clip.scene_id:
+            tags.append("✎")
+        if clip.locked:
+            tags.append("🔒")
+        if decision is not None and decision.confidence < 70:
+            tags.append("⚠")  # low-confidence AI decision
+        if tags:
+            label = " ".join(tags) + "  " + label
         p.setPen(QColor("#ffffff"))
         p.save()
         p.setClipRect(r.adjusted(4, 0, -4, 0))
@@ -319,7 +339,8 @@ class TimelineCanvas(QWidget):
     def mouseDoubleClickEvent(self, e) -> None:  # noqa: N802
         hit = self._hit_clip(e.position().x(), e.position().y())
         if hit:
-            self.clip_double_clicked.emit(hit[0].asset_id)
+            if hit[0].kind == "media":
+                self.clip_double_clicked.emit(hit[0].asset_id)
 
     def wheelEvent(self, e) -> None:  # noqa: N802
         if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -346,7 +367,14 @@ class TimelineCanvas(QWidget):
         clip = hit[0]
         self.ctx.ws.select_clip(clip.id)
         menu = QMenu(self)
-        menu.addAction("Preview media", lambda: self.clip_double_clicked.emit(clip.asset_id))
+        if clip.kind == "media":
+            menu.addAction("Preview media", lambda: self.clip_double_clicked.emit(clip.asset_id))
+        t = self.playhead
+        split = menu.addAction("Split at playhead", lambda: self.ctx.guard(self, lambda: self.ctx.ws.timeline.split_clip(clip.id, t), modal=True, title="Split"))
+        split.setEnabled(clip.timeline_start < t < clip.timeline_end)
+        if clip.scene_id:
+            menu.addAction("Unlock clip" if clip.locked else "Lock clip (protect from AI regeneration)",
+                           lambda: self.ctx.guard(self, lambda: self.ctx.ws.editing.lock_clip(clip.id, not clip.locked), modal=True, title="Lock"))
         menu.addAction("Delete clip", self.delete_selected)
         menu.exec(e.globalPosition().toPoint())
 

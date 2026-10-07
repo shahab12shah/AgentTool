@@ -37,14 +37,15 @@ from app.ui.project_view import ProjectView
 from app.ui.script_panel import ScriptPanel
 from app.ui.theme import stylesheet
 from app.ui.timeline_panel import TimelinePanel
+from app.ui.ai_edit_panel import AIEditPanel
 from app.ui.review_panel import ReviewPanel
 from app.ui.scene_panel import ScenePanel
 from app.ui.visuals_panel import VisualsPanel
 from app.ui.voice_panel import VoicePanel
 
-NAV = ("Project", "Script", "Voice", "Scenes", "Visuals", "Review", "Edit", "Timeline", "Export")
+NAV = ("Project", "Script", "Voice", "Scenes", "Visuals", "Review", "AI Edit", "Edit", "Timeline", "Export")
 PLACEHOLDERS = {  # name -> (badge, description)
-    "Edit": ("Coming in a later phase", "AI editing: captions, motion graphics, transitions and audio mixing as editable timeline decisions."),
+    "Edit": ("Coming in a later phase", "Caption rendering, audio mixing, music/SFX libraries and final export are planned for later phases."),
 }
 
 
@@ -94,6 +95,8 @@ class MainWindow(QMainWindow):
         self.scene_panel = ScenePanel(ctx, self.voice_panel.player)  # the voice-over player is shared
         self.visuals_panel = VisualsPanel(ctx)
         self.review_panel = ReviewPanel(ctx)
+        self.ai_edit_panel = AIEditPanel(ctx, self.voice_panel.player)
+        self.ai_edit_panel.go_to_research = self._research_scene
         self.export_panel = ExportPanel(ctx)
         self.project_view = ProjectView(ctx)
         self.jobs_panel = JobsPanel(ctx)
@@ -201,6 +204,7 @@ class MainWindow(QMainWindow):
             "Scenes": self.scene_panel,
             "Visuals": self.visuals_panel,
             "Review": self.review_panel,
+            "AI Edit": self.ai_edit_panel,
             "Timeline": timeline_page,
             "Export": self.export_panel,
         }
@@ -280,6 +284,14 @@ class MainWindow(QMainWindow):
         self.autosave_timer.start(self.ws.settings.autosave_interval_seconds * 1000)
 
     # ------------------------------------------------------------ navigation
+    def _research_scene(self, scene_id: str) -> None:
+        self.go_to("Review")
+        self.review_panel.scene_id = scene_id
+        for r in range(self.review_panel.table.rowCount()):
+            if self.review_panel.table.item(r, 0).data(Qt.ItemDataRole.UserRole) == scene_id:
+                self.review_panel.table.selectRow(r)
+                break
+
     def go_to(self, name: str) -> None:
         self.nav.setCurrentRow(self.page_index[name])
 
@@ -291,10 +303,13 @@ class MainWindow(QMainWindow):
         self.preview.pause()
         self.voice_panel.pause()
         self.scene_panel.pause()
+        self.ai_edit_panel.pause()
         self.pages.setCurrentIndex(row)
         self._place_shared(name)
         if name == "Review":
             self.review_panel.refresh()
+        if name == "AI Edit":
+            self.ai_edit_panel.refresh()
         if name == "Export":
             self.export_panel.check()
 

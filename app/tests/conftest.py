@@ -112,3 +112,30 @@ def research_ws(ws, tmp_path):
     from app.tests.helpers import NARRATION
 
     return pipeline_ws(ws, tmp_path, NARRATION)
+
+
+@pytest.fixture
+def edit_ws(research_ws, tmp_path):
+    """Phase 4 starting point: scenes + approved visual assignments backed by real project assets (2 videos, 4 stills)."""
+    from app.research.models import Acquisition, VisualAssignment
+    from app.project.phase3_commands import SceneDecisionCommand
+    from app.tests.helpers import make_image, make_video
+
+    ws = research_ws
+    d = tmp_path / "edit_media"
+    d.mkdir()
+    files = [make_video(d / "v_long.mp4", 12.0), make_video(d / "v_short.mp4", 3.0, "testsrc2"),
+             make_image(d / "wide.png", "testsrc", "1600x600"), make_image(d / "portrait.png", "testsrc2", "600x900"),
+             make_image(d / "plain.png", "gradient", "1280x720"), make_image(d / "doc.png", "mandel", "800x1000")]
+    ws.media.import_files(files)
+    assert ws.jobs.wait_idle(60)
+    p = ws.project
+    by_name = {a.name: a for a in p.assets.all()}
+    ws.assets_by = by_name
+    pool = [by_name[n] for n in ("v_long.mp4", "wide.png", "portrait.png", "plain.png", "v_short.mp4", "doc.png")]
+    for i, sc in enumerate(p.scenes):
+        evid = p.visual_intents.get(sc.id) and p.visual_intents[sc.id].type.value == "EVIDENCE"
+        asset = by_name["doc.png"] if evid else pool[i % (len(pool) - 1)]
+        a = VisualAssignment(sc.id, None, asset.id, "USER", 90.0, True, False, acquisition=Acquisition.LOCAL, source_type=asset.source_type)
+        ws.apply_command(SceneDecisionCommand(p, sc.id, "assign", assignment=a))
+    return ws

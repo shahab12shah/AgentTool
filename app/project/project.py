@@ -32,6 +32,14 @@ from app.research.models import (
     SceneResearchState,
     VisualAssignment,
 )
+from app.editing.models import (
+    EditingDecision,
+    EditingSession,
+    EditingSettings,
+    EditingStrategy,
+    OverrideRecord,
+    TimelineGeneration,
+)
 from app.storage.paths import ProjectPaths
 from app.transcription.alignment import ScriptAlignment
 from app.transcription.models import TranscriptionState
@@ -72,6 +80,14 @@ class Project:
     visual_assignments: dict[str, VisualAssignment] = field(default_factory=dict)
     source_metadata: dict[str, Any] = field(default_factory=dict)
     research_status: dict[str, SceneResearchState] = field(default_factory=dict)
+    # Phase 4: AI editing
+    editing_settings: EditingSettings = field(default_factory=EditingSettings)
+    editing_strategy: EditingStrategy = field(default_factory=EditingStrategy)
+    editing_sessions: list[EditingSession] = field(default_factory=list)
+    editing_decisions: dict[str, EditingDecision] = field(default_factory=dict)
+    timeline_generation: TimelineGeneration = field(default_factory=TimelineGeneration)
+    ai_overrides: list[OverrideRecord] = field(default_factory=list)
+    timeline_version: int = 0
     schema_version: int = SCHEMA_VERSION
     application_version: str = APP_VERSION
     # Runtime-only state (never serialised):
@@ -146,7 +162,7 @@ class Project:
                 clip_ids.add(c.id)
                 if c.track_id != t.id:
                     problems.append(f"clip {c.id} claims track {c.track_id} but is stored on {t.id}")
-                if c.asset_id not in self.assets:
+                if c.kind == "media" and c.asset_id not in self.assets:
                     problems.append(f"clip {c.id} references unknown asset {c.asset_id}")
                 if c.timeline_start < -TIME_EPSILON or c.duration <= 0:
                     problems.append(f"clip {c.id} has an invalid time range")
@@ -215,6 +231,13 @@ class Project:
             "visual_assignments": {k: v.to_dict() for k, v in self.visual_assignments.items()},
             "source_metadata": to_plain(self.source_metadata),
             "research_status": to_plain(self.research_status),
+            "editing_settings": self.editing_settings.to_dict(),
+            "editing_strategy": to_plain(self.editing_strategy),
+            "editing_sessions": to_plain(self.editing_sessions[-50:]),
+            "editing_decisions": {k: v.to_dict() for k, v in self.editing_decisions.items()},
+            "timeline_generation": to_plain(self.timeline_generation),
+            "ai_overrides": to_plain(self.ai_overrides),
+            "timeline_version": self.timeline_version,
             "counters": {"asset": self.assets.counter},
         }
 
@@ -246,6 +269,13 @@ class Project:
                 visual_assignments={k: VisualAssignment.from_dict(v) for k, v in doc["visual_assignments"].items()},
                 source_metadata=dict(doc["source_metadata"]),
                 research_status={k: from_plain(SceneResearchState, v) for k, v in doc["research_status"].items()},
+                editing_settings=EditingSettings.from_dict(doc["editing_settings"]) if doc["editing_settings"] else EditingSettings(),
+                editing_strategy=from_plain(EditingStrategy, doc["editing_strategy"]) if doc["editing_strategy"] else EditingStrategy(),
+                editing_sessions=[from_plain(EditingSession, v) for v in doc["editing_sessions"]],
+                editing_decisions={k: EditingDecision.from_dict(v) for k, v in doc["editing_decisions"].items()},
+                timeline_generation=from_plain(TimelineGeneration, doc["timeline_generation"]) if doc["timeline_generation"] else TimelineGeneration(),
+                ai_overrides=[from_plain(OverrideRecord, v) for v in doc["ai_overrides"]],
+                timeline_version=int(doc["timeline_version"]),
                 assets=AssetRegistry(
                     [Asset.from_dict(a) for a in doc["assets"]], counter=int((doc.get("counters") or {}).get("asset", 0))
                 ),
