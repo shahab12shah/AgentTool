@@ -37,13 +37,13 @@ from app.ui.project_view import ProjectView
 from app.ui.script_panel import ScriptPanel
 from app.ui.theme import stylesheet
 from app.ui.timeline_panel import TimelinePanel
+from app.ui.review_panel import ReviewPanel
 from app.ui.scene_panel import ScenePanel
 from app.ui.visuals_panel import VisualsPanel
 from app.ui.voice_panel import VoicePanel
 
 NAV = ("Project", "Script", "Voice", "Scenes", "Visuals", "Review", "Edit", "Timeline", "Export")
 PLACEHOLDERS = {  # name -> (badge, description)
-    "Review": ("Coming in Phase 3", "Review and replace the visuals the AI selected, scene by scene."),
     "Edit": ("Coming in a later phase", "AI editing: captions, motion graphics, transitions and audio mixing as editable timeline decisions."),
 }
 
@@ -93,6 +93,7 @@ class MainWindow(QMainWindow):
         self.voice_panel = VoicePanel(ctx)
         self.scene_panel = ScenePanel(ctx, self.voice_panel.player)  # the voice-over player is shared
         self.visuals_panel = VisualsPanel(ctx)
+        self.review_panel = ReviewPanel(ctx)
         self.export_panel = ExportPanel(ctx)
         self.project_view = ProjectView(ctx)
         self.jobs_panel = JobsPanel(ctx)
@@ -199,6 +200,7 @@ class MainWindow(QMainWindow):
             "Voice": self.voice_panel,
             "Scenes": self.scene_panel,
             "Visuals": self.visuals_panel,
+            "Review": self.review_panel,
             "Timeline": timeline_page,
             "Export": self.export_panel,
         }
@@ -291,6 +293,8 @@ class MainWindow(QMainWindow):
         self.scene_panel.pause()
         self.pages.setCurrentIndex(row)
         self._place_shared(name)
+        if name == "Review":
+            self.review_panel.refresh()
         if name == "Export":
             self.export_panel.check()
 
@@ -391,7 +395,7 @@ class MainWindow(QMainWindow):
         self.ctx.guard(self, self.ws.redo)
 
     def open_settings(self) -> None:
-        dlg = SettingsDialog(self.ws.settings, self.ws.describe_ffmpeg, self.ws.transcripts.provider_report, self)
+        dlg = SettingsDialog(self.ws.settings, self.ws.describe_ffmpeg, self.ws.transcripts.provider_report, self.ws.research.provider_report, self)
         if dlg.exec():
             self.ctx.guard(self, lambda: self.ws.update_settings(dlg.result_settings()), modal=True, title="Settings")
             self._apply_settings()

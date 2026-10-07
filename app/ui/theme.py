@@ -59,6 +59,9 @@ QLabel#muted {{ color: {c['muted']}; }}
 QLabel#placeholder {{ color: {c['muted']}; font-size: 16px; }}
 QLabel#logo {{ font-weight: 700; font-size: 15px; color: {c['accent']}; padding-right: 8px; }}
 QLabel#projectname {{ font-weight: 600; font-size: 14px; padding: 0 12px; }}
+QFrame#infoBox {{ background: {c['panel2']}; border: 1px solid {c['border']}; border-radius: 6px; padding: 6px; }}
+QFrame#candidateCard {{ background: {c['panel2']}; border: 1px solid {c['border']}; border-radius: 6px; }}
+QFrame#candidateCard[role="BEST"] {{ border: 2px solid {c['accent']}; }}
 QFrame#failureBox {{ background: {c['panel2']}; border: 1px solid {c['danger']}; border-radius: 6px; padding: 6px; }}
 QStatusBar, QFrame#jobbar {{ background: {c['panel']}; border-top: 1px solid {c['border']}; }}
 QProgressBar {{ background: {c['panel2']}; border: 1px solid {c['border']}; border-radius: 4px; text-align: center; height: 14px; }}

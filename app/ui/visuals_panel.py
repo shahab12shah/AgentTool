@@ -35,17 +35,18 @@ class VisualsPanel(QWidget):
         self._loading = False
         title = QLabel("Visual Sources")
         title.setObjectName("title")
-        note = QLabel("Visual research arrives in Phase 3 — nothing is searched yet. These preferences are saved in the project "
-                      "and will guide it. Percentages are soft targets: the best visual for a scene always wins "
+        note = QLabel("These preferences are saved in the project and guide visual research (Review page). Percentages are soft targets: the best visual for a scene always wins "
                       "(e.g. a screenshot is used when it is the best evidence, even if screenshots are “over budget”).")
         note.setObjectName("muted")
         note.setWordWrap(True)
 
         self.enabled: dict[SourceKind, QCheckBox] = {}
         self.target: dict[SourceKind, QSpinBox] = {}
+        self.priority: dict[SourceKind, QSpinBox] = {}
         grid = QGridLayout()
         grid.addWidget(QLabel("Source"), 0, 0)
         grid.addWidget(QLabel("Target %"), 0, 1)
+        grid.addWidget(QLabel("Priority (1–5)"), 0, 2)
         for row, kind in enumerate(SourceKind, start=1):
             cb = QCheckBox(SOURCE_LABELS[kind])
             cb.setObjectName(f"enable_{kind.value}")
@@ -57,6 +58,13 @@ class VisualsPanel(QWidget):
             self.enabled[kind], self.target[kind] = cb, sp
             grid.addWidget(cb, row, 0)
             grid.addWidget(sp, row, 1)
+            pr = QSpinBox()
+            pr.setObjectName(f"priority_{kind.value}")
+            pr.setRange(1, 5)
+            pr.setToolTip("A soft nudge: higher-priority sources are preferred when candidates score about the same")
+            self.priority[kind] = pr
+            grid.addWidget(pr, row, 2)
+            pr.valueChanged.connect(self._changed)
             cb.toggled.connect(self._changed)
             sp.valueChanged.connect(self._changed)
         self.total_label = QLabel()
@@ -112,6 +120,7 @@ class VisualsPanel(QWidget):
         for kind in SourceKind:
             s = prefs.setting(kind)
             s.enabled, s.target_percent = self.enabled[kind].isChecked(), float(self.target[kind].value())
+            s.priority = self.priority[kind].value()
         prefs.min_accuracy_score = self.accuracy.value()
         for key, cb in self.rules.items():
             setattr(prefs, key, cb.isChecked())
@@ -146,11 +155,12 @@ class VisualsPanel(QWidget):
                 s = prefs.setting(kind)
                 self.enabled[kind].setChecked(s.enabled)
                 self.target[kind].setValue(int(round(s.target_percent)))
+                self.priority[kind].setValue(int(s.priority))
             self.accuracy.setValue(prefs.min_accuracy_score)
             for key, cb in self.rules.items():
                 cb.setChecked(getattr(prefs, key))
         finally:
             self._loading = False
-        for w in (*self.enabled.values(), *self.target.values(), *self.rules.values(), self.accuracy, self.reset_btn):
+        for w in (*self.enabled.values(), *self.target.values(), *self.priority.values(), *self.rules.values(), self.accuracy, self.reset_btn):
             w.setEnabled(project is not None)
         self._show_report(prefs)

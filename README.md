@@ -65,13 +65,53 @@ Change detection: replacing the voice-over marks the transcript `OUTDATED` (deri
 
 Schema version is now **2** (additive; version-1 projects migrate on open). Visual source preferences (soft targets, accuracy threshold, rules) are saved in the project; `VisualResearchService` is an interface only — nothing is searched.
 
+## Phase 3 — AI visual research engine
+
+```
+Scene ─► Research Brief (+ context memory) ─► multi-purpose queries ─► source providers (isolated, parallel, cached)
+      ─► normalised candidates ─► de-duplication ─► evaluation (0–100, 7 weighted components, explainable)
+      ─► ranking (accuracy dominates; soft source targets, repetition and continuity adjustments)
+      ─► best + up to 5 diverse alternatives ─► user review ─► Visual Assignment ─► project asset
+```
+
+Code lives in `research/` (Qt-free) and `services/research_service.py`; the UI is the **Review** page (`ui/review_panel.py`). Research never touches the timeline.
+
+* **Brief** (`brief.py`): subject, action, context, visual type, evidence level, preferred/avoided sources, plus context from neighbouring scenes ("That means…" scenes inherit the subject) and traps to avoid (e.g. *coin* imagery for solar-silver).
+* **Queries** (`queries.py`): LITERAL / CONTEXT / PROCESS / EVIDENCE / ENTITY / LOCATION / DATA / NEWS / DOCUMENT / ALTERNATIVE, each with a purpose and source preference. *Search Again* uses a new strategy each time (broader, specific, process, evidence, alternative, sources) — never the same search twice.
+* **Providers** (`research/providers/`, `ProviderRegistry`): each implements `search`, `fetch_thumbnail`, `acquire`. A failing provider is reported and isolated; if all fail the scene shows *"Visual research unavailable."* with Retry / Expand Sources / Generate AI Visual / Manual Select / Skip. Random stock is never substituted silently. Expanding to disabled sources always asks first and never changes your preferences.
+* **Evaluation** (`evaluation.py`): semantic .35 · subject .20 · context .15 · action .10 · timing .10 · quality .05 · source .05, with concise "why" factors. Categories: ≥90 Excellent, 80–89 Good, 70–79 Review, 60–69 Weak, <60 Reject. Default minimum 85 (configurable on the Visuals page).
+* **Ranking** (`ranking.py`): accuracy decides; bounded adjustments (+6 / −15) for source targets, priority, repetition and continuity; alternatives are chosen greedily with a diversity penalty and must score ≥ 60.
+* **Decisions**: Use / Replace / Reject / Skip / Approve / More like this / bulk approve (confirmation; scenes below the minimum are skipped, never forced). Choosing a candidate acquires it as a *project asset* (download job, validation, registration); a research result alone is not an asset. All decisions are undoable commands. Approving requires accuracy ≥ minimum unless **you** chose the visual.
+* **Schema 3** adds `research_settings`, `research_queries`, `research_sessions`, `visual_candidates`, `candidate_scores`, `visual_assignments`, `source_metadata`, `research_status` (v1/v2 projects migrate on open). Editing a scene prunes/flags its research; the table shows "(scene changed)".
+* **Secrets**: only environment-variable *names* are stored (YouTube, Pexels, AI image); keys are never saved, logged or shown.
+
+### Provider status (honest)
+
+| provider | sources | status in this repo |
+|---|---|---|
+| `local_stock` | stock image/video from a folder you point at | **runs for real** (tests use real files and FFmpeg) |
+| `screenshot` | Chromium page capture, official-site homepages | **runs for real against local test pages** with the installed Chromium; real websites were not reachable from the sandbox. Evidence stays "needs verification". |
+| `wikimedia` | web images (Commons) | adapter **tested against a mock HTTP server only** |
+| `youtube` | YouTube search (Data API) | **mock-tested only**; results are **reference-only** — videos are never downloaded, chapters become suggested segments |
+| `pexels` | stock image/video | **mock-tested only** |
+| `ai_image` | AI-generated image | **mock-tested only**; proposes a prompt first, generates only on request (may cost money); never counted as evidence |
+
+No provider other than `local_stock` was exercised against its real service. Licences shown are what the source *states*; the application never verifies rights — check licences before publishing.
+
 ## Status
 
 Implemented (Phase 1, see above for Phase 2): project create/open/save/save-as/close with recent list; media import (copy or link) with probing, duplicate detection and cached background thumbnails; media library (search/sort/remove/drag); script editor; voice-over import/replace/remove/playback; single-file preview; 8-track timeline with add/rename/hide/mute/lock/delete tracks and add/move/trim/delete clips (mouse, inspector, drag-drop, snapping); inspector; undo/redo; autosave + crash recovery; job manager with status bar and jobs panel; settings; logging; renderer validation/plan.
 
-Not implemented: visual research/search/download, candidate scoring, AI images, Review/Edit pages ("Coming in Phase 3 / a later phase"), rendering (Export only validates and shows the plan).
+Phase 3 adds visual research, scoring, ranking, review and assignment (above). Not implemented: the Edit page ("Coming in a later phase"), writing assignments onto the timeline, rendering (Export only validates and shows the plan).
 
 ### Known limitations
+**Phase 3**
+- Scoring is **metadata/text based** (titles, descriptions, tags, duration, licence, resolution). Pixels are not inspected, so a mislabelled result can score well; every score carries `basis: METADATA`. The preview and your review are the real check.
+- Real-service behaviour (rate limits, response variations, API changes) of Wikimedia, YouTube, Pexels and the AI image service is unverified. YouTube videos cannot be acquired (reference-only).
+- "More like this" re-searches with a more specific wording; it does not use visual similarity.
+- No visual-similarity model: near-duplicate detection uses a perceptual hash of thumbnails only.
+- Interactive UI was driven by scripted events in a headless environment; no human has used it on a real display.
+
 **Phase 2**
 - No accurate speech model could be obtained in the development sandbox (model hosts were blocked). On clean synthetic speech the bundled PocketSphinx engine recovered only ~24% of the script's words — treat it as a demo fallback. Real-world accuracy of `faster-whisper` and `api` is unverified here.
 - The semantic analyzer is heuristic: small built-in lexicons (agencies, countries, cities, companies, commodities, technologies, objects), cue words and lexical cohesion. Unknown names are found only by capitalisation (which un-punctuated transcripts lack unless the script is aligned), topics are noun-phrase guesses, visual types are cue-scored, and it only handles English. Expect mis-typed scenes and awkward topics; that is what the review UI and the `SemanticAnalyzer` interface are for.
@@ -87,5 +127,5 @@ Not implemented: visual research/search/download, candidate scoring, AI images, 
 - Clip transform values (position/scale/rotation/opacity) are stored and editable but not yet applied by any renderer. `Source In/Out` are read-only (changed by trimming).
 - Tests cover logic and a scripted UI workflow with synthetic mouse events; no human has used the GUI on a real display.
 
-## Next: Phase 3
-Implement `VisualResearchService` against the structured scenes (never raw script sentences): per-source searchers (stock, YouTube, web, screenshots), candidate scoring against `VisualIntent` and the saved preferences (minimum accuracy, soft source targets, avoid repeats), a review/replace workflow that writes to the timeline as undoable commands, and a real model-backed `SemanticAnalyzer` and Whisper-class transcription validated on real narration.
+## Next: Phase 4
+Write approved Visual Assignments onto the timeline as undoable commands (placement from the recommended duration/segment, crop hints), then the Edit page: captions, zooms/motion, transitions and audio mixing. Also: pixel-level candidate verification (vision model), validating the providers against their real services, and a model-backed `SemanticAnalyzer` and Whisper-class transcription validated on real narration.
