@@ -1,0 +1,31 @@
+{
+  "name": "agenttool-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI video editor: give a script + voiceover, get an edited video",
+  "main": "main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite renderer --port 5173\" \"wait-on tcp:5173 && cross-env VITE_DEV=1 electron .\"",
+    "build:ui": "vite build renderer",
+    "start": "npm run build:ui && electron .",
+    "dist": "npm run build:ui && electron-builder"
+  },
+  "build": {
+    "appId": "com.agenttool.app",
+    "files": ["main.js", "preload.js", "renderer/dist/**"],
+    "extraResources": [{ "from": "../engine", "to": "engine", "filter": ["**/*.py"] }]
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.0",
+    "concurrently": "^9.0.0",
+    "cross-env": "^7.0.3",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
+    "vite": "^5.4.0",
+    "wait-on": "^8.0.0"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}
