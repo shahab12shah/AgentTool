@@ -44,6 +44,15 @@ class PreflightFailed(RenderError):
         self.report = report
 
 
+class QCGateBlocked(RenderError):
+    """The latest, still-current quality-control run blocks the export (Critical issues, or Errors / Warnings according to the project's QC setting)."""
+
+    def __init__(self, message: str, *, overridable: bool = False, issue_ids: list[str] | None = None) -> None:
+        super().__init__(message, stage="Quality Control", kind="qc_blocked", possible_issue="Fix the blocking issues in AI Quality Control, then export again.")
+        self.overridable = overridable
+        self.issue_ids = issue_ids or []
+
+
 class RenderService:
     def __init__(self, projects: ProjectManager, jobs: JobManager, bus: EventBus, apply_command: Callable[[Command], None], execute_command: Callable[[Command], object],
                  settings_getter: Callable, media_service, checkpoint: Callable[[Project, str], str], autosave: Callable[[Project], None]) -> None:
@@ -56,6 +65,7 @@ class RenderService:
         self.preview = PreviewEngine(self.engine, lambda: self._projects.current.root if self._projects.current else None)
         self.queue = RenderQueue(self.engine, self._on_update, self._on_finished, max_parallel=1)
         self._outputs: dict[str, Path] = {}
+        self.qc_gate: Callable[[], object] | None = None  # installed by the Workspace: returns app.qc.qc_service.GateResult (blocks only when a *current* QC run says so)
         self.chunk_seconds = 30.0  # target length of one cached video section (scene aligned)
         self.chunk_max_seconds: float | None = None
 
@@ -138,9 +148,12 @@ class RenderService:
 
     # ------------------------------------------------------------------ export
     def start_export(self, output: Path | None = None, *, overwrite: bool = False, allow_proxy_assets: set[str] | None = None, settings: RenderSettings | None = None,
-                     kind: str = "export", force_cpu: bool = False, skip_preflight: bool = False) -> RenderJob:
-        """Autosave, checkpoint, preflight, freeze a snapshot and queue the render. Raises ``PreflightFailed`` when something blocks it."""
+                     kind: str = "export", force_cpu: bool = False, skip_preflight: bool = False, qc_override: bool = False) -> RenderJob:
+        """Autosave, checkpoint, preflight, freeze a snapshot and queue the render. Raises ``PreflightFailed`` when something blocks it and ``QCGateBlocked`` when the current
+        quality-control result blocks the export (``qc_override`` is the user's explicit "export anyway", honoured only where the QC settings allow it)."""
         project = self._project()
+        if kind == "export" and not skip_preflight:
+            self._check_qc_gate(qc_override)
         allow = set(allow_proxy_assets or ())
         settings = replace(settings or project.render_settings)
         if not skip_preflight:
@@ -169,6 +182,22 @@ class RenderService:
         log_event(_log, "render.queued", render_id=render_id, output=str(target), kind=kind)
         self.queue.submit(job)
         return job
+
+    def _check_qc_gate(self, override: bool) -> None:
+        if self.qc_gate is None:
+            return
+        try:
+            gate = self.qc_gate()
+        except Exception:  # noqa: BLE001  (QC is advisory infrastructure: if it cannot answer, the render path must not break)
+            _log.warning("QC gate unavailable", exc_info=True)
+            return
+        if gate is None or not getattr(gate, "blocked", False):
+            return
+        d = gate.decision
+        if override and d.overridable:
+            log_event(_log, "render.qc_override", blocking=len(d.blocking_ids))
+            return
+        raise QCGateBlocked(d.message, overridable=d.overridable, issue_ids=list(d.blocking_ids))
 
     def start_draft(self, settings: RenderSettings | None = None) -> RenderJob:
         s = P.apply_preset(settings or self._project().render_settings, "draft")

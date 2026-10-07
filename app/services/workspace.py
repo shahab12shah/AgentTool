@@ -38,6 +38,7 @@ from app.visual.research import VisualResearchService
 from app.services.research_service import ResearchService
 from app.services.editing_service import EditingService
 from app.services.presentation_service import PresentationService
+from app.qc.qc_service import QCService
 from app.services.reference_service import ReferenceService
 from app.services.render_service import RenderService
 from app.project.phase2_commands import SetVisualPreferencesCommand
@@ -81,10 +82,49 @@ class Workspace:
         self.render = RenderService(self.projects, self.jobs, self.bus, self.apply_command, self.commands.execute, lambda: self.settings, self.media, self.editing._checkpoint,
                                     lambda project: self.autosave.request(project, force=True))
         self.reference = ReferenceService(self.projects, self.jobs, self.bus, self.apply_command, self.commands.execute, lambda: self.settings, self.editing._checkpoint)
+        self.qc = QCService(self.projects, self.jobs, self.bus, self.apply_command, self.commands.execute, lambda: self.settings, self.editing._checkpoint)
+        self.render.qc_gate = self.qc.export_gate  # the export is blocked only by a QC run that still matches the project
+        self._install_fix_engine()
+        self.bus.subscribe(Topics.RENDER_HISTORY_CHANGED, self._on_render_history)
         self.timeline.edit_hook = self._edit_hook
         self.selected_clip_id: str | None = None
 
         self.bus.subscribe(Topics.PROJECT_CHANGED, self._on_project_changed)
+
+    def _install_fix_engine(self) -> None:
+        """QC fixes are undoable commands built from the editing / presentation / timeline / render services (kept optional: QC analysis works without the fix engine)."""
+        try:
+            from types import SimpleNamespace  # noqa: PLC0415
+
+            from app.qc.fix_engine import QCFixEngine  # noqa: PLC0415
+
+            self.qc.fixes = QCFixEngine(self.projects, self.commands.execute, self.editing._checkpoint,
+                                        SimpleNamespace(editing=self.editing, presentation=self.presentation, timeline=self.timeline, render=self.render, research=self.research, media=self.media))
+        except ImportError:
+            self.qc.fixes = None
+
+    def _on_render_history(self, _topic: str, payload: dict) -> None:
+        """A render was recorded: if it is a finished export, check the rendered file (post-render QC). Runs on the render worker thread: hand off to the callback thread."""
+        render_id = payload.get("render_id")
+        if render_id:
+            self.jobs.dispatch(lambda: self._post_render_qc(render_id))
+
+    def _post_render_qc(self, render_id: str) -> None:
+        from app.rendering.models import RenderStatus  # noqa: PLC0415
+
+        project = self.projects.current
+        if project is None or project.root is None or not project.qc_settings.post_render_qc or render_id in project.render_qc_results:
+            return
+        job = self.render.job(render_id)
+        if job is None or job.status is not RenderStatus.COMPLETED or job.record.kind != "export" or job.result is None:
+            return
+        out = Path(job.result.output_path)
+        if not out.is_file() or project.project_id != job.record.project_id:
+            return
+        try:
+            self.qc.run_post_render_qc(render_id, out)
+        except Exception:  # noqa: BLE001  (the second QC pass is advisory: it must never disturb the finished export)
+            _log.warning("post-render QC could not start", exc_info=True)
 
     def _edit_hook(self, clip_id: str, action: str) -> Command | None:
         """Manual timeline edits take ownership of AI-created objects (AI edit decisions and presentation decisions)."""

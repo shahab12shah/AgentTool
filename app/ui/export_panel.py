@@ -68,6 +68,7 @@ def fmt_clock(seconds: float | None) -> str:
 
 class ExportPanel(QWidget):
     return_to_editor = Signal()
+    open_qc_requested = Signal()
 
     def __init__(self, ctx: UiContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -189,6 +190,17 @@ class ExportPanel(QWidget):
         pr.addWidget(self.recheck_btn)
         pr.addStretch(1)
         pl.addLayout(pr)
+        self.qc_line = QLabel("")
+        self.qc_line.setObjectName("exportQcStatus")
+        self.qc_line.setWordWrap(True)
+        self.qc_line.setTextFormat(Qt.TextFormat.PlainText)
+        self.qc_btn = QPushButton("Open AI Quality Control")
+        self.qc_btn.setObjectName("exportOpenQc")
+        self.qc_btn.clicked.connect(self.open_qc_requested.emit)
+        qr = QHBoxLayout()
+        qr.addWidget(self.qc_line, 1)
+        qr.addWidget(self.qc_btn)
+        pl.addLayout(qr)
 
         self.start_btn = QPushButton("START EXPORT")
         self.start_btn.setObjectName("primary")
@@ -435,7 +447,26 @@ class ExportPanel(QWidget):
         self.refresh_proxies()
         self._load_scopes()
         self._sync_queue()
+        self._refresh_qc_line()
         self.run_preflight()
+
+    def _refresh_qc_line(self) -> None:
+        """One line about the quality-control state (the export gate): READY / AVAILABLE / BLOCKED, or that QC has not run for the current project."""
+        ws = self.ctx.ws
+        if ws.project is None:
+            self.qc_line.setText("")
+            return
+        try:
+            g = ws.qc.export_gate()
+        except Exception:  # noqa: BLE001  (informational only)
+            self.qc_line.setText("")
+            return
+        if g.needs_run:
+            self.qc_line.setText("Quality control: " + ("not run yet" if not ws.project.qc_runs else "the project changed since the last run") + (" — it runs automatically before export." if ws.project.qc_settings.run_before_export else "."))
+            self.qc_line.setStyleSheet("")
+        else:
+            self.qc_line.setText("Quality control: " + g.decision.message)
+            self.qc_line.setStyleSheet("color: #ff9d9d;" if g.decision.blocked else "color: #e5a24a;" if g.decision.status == "AVAILABLE" else "color: #6fcf97;")
 
     def _set(self, combo: QComboBox, data) -> None:
         i = combo.findData(data)
@@ -588,31 +619,67 @@ class ExportPanel(QWidget):
     def start_draft(self) -> None:
         self._submit(draft=True)
 
-    def _submit(self, draft: bool) -> None:
+    def _submit(self, draft: bool, *, qc_checked: bool = False, qc_override: bool = False) -> None:
         ws = self.ctx.ws
         if ws.project is None:
             return
         self._reset_cards()
+        if not draft and not qc_checked and ws.project.qc_settings.run_before_export:
+            gate = ws.qc.export_gate()
+            if gate.needs_run:  # QC has not looked at this version of the project: run it first, then continue exporting
+                self.status("Running quality control before the export…")
+                try:
+                    ws.qc.run_full_qc(trigger="export", on_done=lambda _run: self._submit(False, qc_checked=True), on_error=lambda job: self.status(f"Quality control failed: {job.error}"))
+                    return
+                except AppError as exc:
+                    QMessageBox.warning(self, "Quality control", exc.user_message)
+                    return
 
         def go() -> None:
             ws.render.update_settings(**self._gather())
             if draft:
                 job = ws.render.start_draft()
             else:
-                job = ws.render.start_export(self._output, overwrite=self.overwrite.isChecked(), allow_proxy_assets=set(self._allow_proxy))
+                job = ws.render.start_export(self._output, overwrite=self.overwrite.isChecked(), allow_proxy_assets=set(self._allow_proxy), qc_override=qc_override)
             self._current_job = job.id
             self._on_job(job)
             self.tabs.setCurrentIndex(0)
 
-        from app.services.render_service import PreflightFailed
+        from app.services.render_service import PreflightFailed, QCGateBlocked
 
         try:
             go()
+        except QCGateBlocked as exc:
+            self._refresh_qc_line()
+            self._show_blocked(exc, draft)
         except PreflightFailed as exc:
             self._show_report(exc.report)
             self.status(exc.user_message)
         except AppError as exc:
             QMessageBox.warning(self, "Cannot start the export", exc.user_message)
+
+    def _show_blocked(self, exc, draft: bool) -> None:
+        """EXPORT BLOCKED: list what blocks, offer Open Quality Control, and — only where the QC settings allow it and nothing is Critical — an explicit "Export anyway"."""
+        ws = self.ctx.ws
+        names = []
+        for iid in exc.issue_ids[:8]:
+            try:
+                i = ws.qc.issue(iid)
+                names.append(f"• {i.severity.value.title()} — {i.title}")
+            except AppError:
+                continue
+        text = exc.user_message + (chr(10) * 2 + chr(10).join(names) if names else "")
+        box = QMessageBox(QMessageBox.Icon.Warning, "Export blocked", text, QMessageBox.StandardButton.NoButton, self)
+        box.setObjectName("exportBlockedDialog")
+        open_btn = box.addButton("Open Quality Control", QMessageBox.ButtonRole.AcceptRole)
+        anyway = box.addButton("Export anyway", QMessageBox.ButtonRole.DestructiveRole) if exc.overridable else None
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is open_btn:
+            self.open_qc_requested.emit()
+        elif anyway is not None and clicked is anyway:
+            self._submit(draft, qc_checked=True, qc_override=True)
 
     def _on_job(self, job: RenderJob) -> None:
         row = self._rows.get(job.id)

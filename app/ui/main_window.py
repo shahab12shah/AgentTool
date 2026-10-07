@@ -29,6 +29,7 @@ from app.ui.dialogs.message import ask_save_changes, show_error
 from app.ui.dialogs.recovery_dialog import RecoveryDialog
 from app.ui.dialogs.settings_dialog import SettingsDialog
 from app.ui.export_panel import ExportPanel
+from app.ui.qc_panel import QCPanel
 from app.ui.reference_panel import ReferencePanel
 from app.ui.inspector_panel import InspectorPanel
 from app.ui.jobs_panel import JobsPanel, JobStatusBar
@@ -45,7 +46,7 @@ from app.ui.scene_panel import ScenePanel
 from app.ui.visuals_panel import VisualsPanel
 from app.ui.voice_panel import VoicePanel
 
-NAV = ("Project", "Script", "Voice", "Scenes", "Visuals", "Review", "Reference", "AI Edit", "Audio & Captions", "Edit", "Timeline", "Export")
+NAV = ("Project", "Script", "Voice", "Scenes", "Visuals", "Review", "Reference", "AI Edit", "Audio & Captions", "Edit", "Timeline", "Quality", "Export")
 PLACEHOLDERS = {  # name -> (badge, description)
     "Edit": ("Coming in a later phase", "Caption rendering, audio mixing, music/SFX libraries and final export are planned for later phases."),
 }
@@ -102,6 +103,7 @@ class MainWindow(QMainWindow):
         self.presentation_panel = PresentationPanel(ctx, self.voice_panel.player)
         self.export_panel = ExportPanel(ctx)
         self.reference_panel = ReferencePanel(ctx)
+        self.qc_panel = QCPanel(ctx)
         self.project_view = ProjectView(ctx)
         self.jobs_panel = JobsPanel(ctx)
         self.job_bar = JobStatusBar(ctx, self.jobs_panel)
@@ -212,6 +214,7 @@ class MainWindow(QMainWindow):
             "AI Edit": self.ai_edit_panel,
             "Audio & Captions": self.presentation_panel,
             "Timeline": timeline_page,
+            "Quality": self.qc_panel,
             "Export": self.export_panel,
         }
         for name in NAV:
@@ -250,7 +253,13 @@ class MainWindow(QMainWindow):
         self.script_panel.analyze_requested.connect(lambda: self.go_to("Scenes"))
         self.project_view.open_requested.connect(self.open_project)
         self.export_panel.return_to_editor.connect(lambda: self.go_to("Timeline"))
+        self.export_panel.open_qc_requested.connect(lambda: self.go_to("Quality"))
         self.reference_panel.go_to_ai_edit.connect(lambda: self.go_to("AI Edit"))
+        self.qc_panel.open_timeline_requested.connect(self._qc_open_timeline)
+        self.qc_panel.open_scene_requested.connect(self._research_scene)
+        self.qc_panel.replace_visual_requested.connect(self._research_scene)
+        self.qc_panel.search_again_requested.connect(self._qc_search_again)
+        self.timeline_panel.qc_issue_requested.connect(self._qc_show_issue)
         self.project_view.close_requested.connect(self.close_project)
         for topic in ("project.opened", "project.closed", "project.dirty_changed", "project.saved"):
             b.on(topic, lambda p: self._sync_state())
@@ -300,6 +309,27 @@ class MainWindow(QMainWindow):
                 self.review_panel.table.selectRow(r)
                 break
 
+    def _qc_open_timeline(self, t: float, clip_id: str) -> None:
+        """Jump from a QC issue to its place on the timeline: playhead, scroll and (if it still exists) the clip."""
+        self.go_to("Timeline")
+        canvas = self.timeline_panel.canvas
+        canvas.set_playhead(t)
+        bar = self.timeline_panel.inner.horizontalScrollBar()
+        bar.setValue(max(0, int(canvas.time_to_x(t)) - 120))
+        project = self.ws.project
+        if clip_id and project is not None and project.timeline.get_clip(clip_id) is not None:
+            self.ws.select_clip(clip_id)
+
+    def _qc_show_issue(self, issue_id: str) -> None:
+        self.go_to("Quality")
+        self.qc_panel.refresh()
+        self.qc_panel.select_issue(issue_id)
+
+    def _qc_search_again(self, scene_id: str) -> None:
+        """Search again for a visual for the scene (the user then approves a result on the Review page)."""
+        self._research_scene(scene_id)
+        self.ctx.guard(self, lambda: self.ws.research.search_again(scene_id), modal=True, title="Search again")
+
     def go_to(self, name: str) -> None:
         self.nav.setCurrentRow(self.page_index[name])
 
@@ -314,12 +344,15 @@ class MainWindow(QMainWindow):
         self.ai_edit_panel.pause()
         self.presentation_panel.pause()
         self.reference_panel.pause()
+        self.qc_panel.pause()
         self.pages.setCurrentIndex(row)
         self._place_shared(name)
         if name == "Review":
             self.review_panel.refresh()
         if name == "Reference":
             self.reference_panel.refresh()
+        if name == "Quality":
+            self.qc_panel.refresh()
         if name == "AI Edit":
             self.ai_edit_panel.refresh()
         if name == "Audio & Captions":

@@ -58,6 +58,8 @@ from app.presentation import exports
 from app.editing.overrides import EditingStrategyOverrides
 from app.reference.application import ReferenceAsset, ReferenceSettings, StyleApplication
 from app.reference.style_model import ReferenceStyleProfile
+from app.qc.issue_model import FixRecord, IgnoreRecord, QCIssue, QCScores
+from app.qc.settings import QCSettings
 from app.storage.paths import ProjectPaths
 from app.transcription.alignment import ScriptAlignment
 from app.transcription.models import TranscriptionState
@@ -129,6 +131,16 @@ class Project:
     reference_style_profile: ReferenceStyleProfile | None = None  # the profile of the active reference
     reference_style_overrides: EditingStrategyOverrides = field(default_factory=EditingStrategyOverrides)  # what is applied right now (abstract parameters only)
     style_application_history: list[StyleApplication] = field(default_factory=list)
+    # Phase 8: quality control. Findings and decisions only: QC never stores a copy of the timeline and never flattens anything.
+    qc_settings: QCSettings = field(default_factory=QCSettings)
+    qc_runs: list[dict[str, Any]] = field(default_factory=list)  # one lightweight record per QC run (newest last)
+    qc_issues: list[QCIssue] = field(default_factory=list)  # the current findings (latest analysis, with the user's ignore / fixed marks)
+    qc_scores: QCScores | None = None  # scores + status + export decision of the latest analysis
+    qc_ignored_issues: list[IgnoreRecord] = field(default_factory=list)
+    qc_fixes: list[FixRecord] = field(default_factory=list)
+    qc_history: list[dict[str, Any]] = field(default_factory=list)  # archived runs (scores, compact issues, fixes, ignored) for comparison
+    qc_cache: dict[str, Any] = field(default_factory=dict)  # checker -> {input_hash, scene_hashes}: lets a later run reuse unchanged analysis
+    render_qc_results: dict[str, dict[str, Any]] = field(default_factory=dict)  # render id -> rendered-file QC result
     schema_version: int = SCHEMA_VERSION
     application_version: str = APP_VERSION
     # Runtime-only state (never serialised):
@@ -304,6 +316,15 @@ class Project:
             "reference_style_profile": self.reference_style_profile.to_dict() if self.reference_style_profile else {},
             "reference_style_overrides": self.reference_style_overrides.to_dict(),
             "style_application_history": [h.to_dict() for h in self.style_application_history[-50:]],
+            "qc_settings": self.qc_settings.to_dict(),
+            "qc_runs": copy.deepcopy(self.qc_runs[-100:]),
+            "qc_issues": [i.to_dict() for i in self.qc_issues],
+            "qc_scores": self.qc_scores.to_dict() if self.qc_scores else {},
+            "qc_ignored_issues": [r.to_dict() for r in self.qc_ignored_issues],
+            "qc_fixes": [f.to_dict() for f in self.qc_fixes[-500:]],
+            "qc_history": copy.deepcopy(self.qc_history[-30:]),
+            "qc_cache": copy.deepcopy(self.qc_cache),
+            "render_qc_results": copy.deepcopy(self.render_qc_results),
             "counters": {"asset": self.assets.counter},
         }
 
@@ -362,6 +383,15 @@ class Project:
                 reference_style_profile=ReferenceStyleProfile.from_dict(doc["reference_style_profile"]) if doc["reference_style_profile"] else None,
                 reference_style_overrides=EditingStrategyOverrides.from_dict(doc["reference_style_overrides"]) if doc["reference_style_overrides"] else EditingStrategyOverrides(),
                 style_application_history=[StyleApplication.from_dict(v) for v in doc["style_application_history"]],
+                qc_settings=QCSettings.from_dict(doc["qc_settings"]) if doc["qc_settings"] else QCSettings(),
+                qc_runs=copy.deepcopy(doc["qc_runs"]),
+                qc_issues=[QCIssue.from_dict(v) for v in doc["qc_issues"]],
+                qc_scores=QCScores.from_dict(doc["qc_scores"]) if doc["qc_scores"] else None,
+                qc_ignored_issues=[IgnoreRecord.from_dict(v) for v in doc["qc_ignored_issues"]],
+                qc_fixes=[FixRecord.from_dict(v) for v in doc["qc_fixes"]],
+                qc_history=copy.deepcopy(doc["qc_history"]),
+                qc_cache=copy.deepcopy(doc["qc_cache"]),
+                render_qc_results=copy.deepcopy(doc["render_qc_results"]),
                 assets=AssetRegistry(
                     [Asset.from_dict(a) for a in doc["assets"]], counter=int((doc.get("counters") or {}).get("asset", 0))
                 ),

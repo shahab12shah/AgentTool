@@ -141,7 +141,7 @@ def test_schema_v7_round_trips_and_older_documents_migrate():
     p.reference_style_overrides = ov
     p.style_application_history.append(StyleApplication("a1", "r1", before=EditingStrategyOverrides(), after=ov))
     doc = json.loads(json.dumps(p.to_document()))
-    assert doc["schema_version"] == 7 and {"reference_settings", "reference_assets", "reference_analysis", "reference_style_profile", "reference_style_overrides",
+    assert doc["schema_version"] == 8 and {"reference_settings", "reference_assets", "reference_analysis", "reference_style_profile", "reference_style_overrides",
                                             "style_application_history"} <= set(doc)
     q = Project.from_document(doc)
     assert q.reference_assets["r1"].content_hash == "abc" and q.reference_style_profile.signature() == p.reference_style_profile.signature()
@@ -151,7 +151,7 @@ def test_schema_v7_round_trips_and_older_documents_migrate():
     for k in ("reference_settings", "reference_assets", "reference_analysis", "reference_style_profile", "reference_style_overrides", "style_application_history"):
         old.pop(k)
     m = Project.from_document(old)
-    assert m.schema_version == 7 and m.reference_assets == {} and m.reference_style_profile is None and m.reference_style_overrides.is_empty and not m.reference_settings.enabled
+    assert m.schema_version == 8 and m.reference_assets == {} and m.reference_style_profile is None and m.reference_style_overrides.is_empty and not m.reference_settings.enabled
 
 
 def test_a_reference_is_never_a_project_asset():

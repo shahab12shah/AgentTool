@@ -30,6 +30,7 @@ def export_win(win, tmp_path, monkeypatch):
     monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(lambda url: opened.append(url.toLocalFile()) or True))
     win.opened = opened
     project = create_project(win, tmp_path, "UiExport")
+    win.ws.qc.update_settings(run_before_export=False)  # these tests are about the export screen itself; the QC-before-export flow has its own tests (test_qc_ui.py)
     win.demo = build_demo(win.ws, tmp_path, big_video=(3840, 2160), wait=lambda: pump(lambda: len(win.ws.project.assets.all()) >= 7 and win.ws.jobs.wait_idle(0), 120))
     win.ws.render.update_settings(resolution="480p", quality="draft", preset_id="draft")
     win.go_to("Export")

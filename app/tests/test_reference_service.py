@@ -217,7 +217,7 @@ def test_persistence_analyze_save_close_reopen(project_ws, ref_video):
     ws.open_project(root)
     p = ws.project
     assert a.reference_id in p.reference_assets and p.reference_assets[a.reference_id].analysis_status == status and p.reference_style_profile.signature() == sig
-    assert p.reference_analysis[a.reference_id]["reference_hash"] == p.reference_assets[a.reference_id].content_hash and p.schema_version == 7
+    assert p.reference_analysis[a.reference_id]["reference_hash"] == p.reference_assets[a.reference_id].content_hash and p.schema_version == 8
     done = []
     assert ws.reference.analyze(on_done=done.append) is None and done  # the on-disk cache is still valid after reopening: no second analysis
     assert ws.reference.profile().signature() == sig and len(p.assets.all()) == 0

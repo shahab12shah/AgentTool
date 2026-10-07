@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QFontMetrics, QPainter, QPen
-from PySide6.QtWidgets import QMenu, QWidget
+from PySide6.QtWidgets import QMenu, QToolTip, QWidget
 
 from app.core.constants import MIN_CLIP_DURATION
 from app.core.timecode import format_timecode
@@ -43,10 +43,13 @@ class TimelineCanvas(QWidget):
     playhead_changed = Signal(float)
     clip_double_clicked = Signal(str)  # asset id
     zoom_changed = Signal(float)
+    marker_clicked = Signal(str)  # QC issue id
 
     def __init__(self, ctx: UiContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.ctx = ctx
+        self.qc_markers: list[dict] = []  # derived from the project's QC issues (never stored here)
+        self.qc_selected: str | None = None
         self.pps = 80.0
         self.playhead = 0.0
         self._drag: _Drag | None = None
@@ -91,9 +94,55 @@ class TimelineCanvas(QWidget):
         """Recompute size/missing-media cache after the project or its content changed."""
         project = self.ctx.ws.project
         self._missing = {a.id for a in project.missing_assets()} if project else set()
+        self.reload_qc_markers()
         duration = project.timeline.duration if project else 0.0
         self.setFixedSize(int(self.time_to_x(duration + 60)) + 200, self.content_height())
         self.update()
+
+    # ------------------------------------------------------------ QC markers
+    def reload_qc_markers(self) -> None:
+        """Re-read the QC markers (severity flags on the ruler; a thin span bar on the affected track). Cheap: they come from the stored issues."""
+        try:
+            self.qc_markers = self.ctx.ws.qc.markers() if self.ctx.ws.project is not None else []
+        except Exception:  # noqa: BLE001  (markers are decoration: never let them break the timeline)
+            self.qc_markers = []
+        self.update()
+
+    def _marker_flag(self, m: dict) -> QRectF:
+        x = self.time_to_x(m["time"])
+        return QRectF(x - 6, RULER_H - 13, 12, 13)
+
+    def _marker_span(self, m: dict) -> QRectF | None:
+        end = m.get("end")
+        tracks = self.tracks()
+        idx = next((i for i, t in enumerate(tracks) if t.id == m.get("track_id")), None)
+        if end is None or end <= m["time"] + 1e-6 or idx is None:
+            return None
+        return QRectF(self.time_to_x(m["time"]), self.row_rect_y(idx) + ROW_H - 4, max(3.0, (end - m["time"]) * self.pps), 3)
+
+    def _hit_marker(self, pos) -> dict | None:
+        for m in self.qc_markers:
+            if self._marker_flag(m).adjusted(-2, 0, 2, 0).contains(pos):
+                return m
+            span = self._marker_span(m)
+            if span is not None and span.adjusted(0, -3, 0, 3).contains(pos):
+                return m
+        return None
+
+    def _paint_qc_markers(self, p: QPainter) -> None:
+        from app.qc.severity import COLORS, Severity  # noqa: PLC0415
+
+        for m in self.qc_markers:
+            col = QColor(COLORS[Severity(m["severity"])])
+            span = self._marker_span(m)
+            if span is not None:
+                fill = QColor(col)
+                fill.setAlpha(170)
+                p.fillRect(span, fill)
+            r = self._marker_flag(m)
+            p.setPen(QPen(QColor("#ffffff") if m["issue_id"] == self.qc_selected else QColor(0, 0, 0, 120), 1.5 if m["issue_id"] == self.qc_selected else 1))
+            p.setBrush(col)
+            p.drawPolygon([QPointF(r.left(), r.top()), QPointF(r.right(), r.top()), QPointF(r.center().x(), r.bottom())])
 
     def set_zoom(self, pps: float) -> None:
         self.pps = max(MIN_PPS, min(MAX_PPS, pps))
@@ -159,6 +208,8 @@ class TimelineCanvas(QWidget):
             p.setPen(QPen(QColor(c["accent"]), 2, Qt.PenStyle.DashLine))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRoundedRect(r, 4, 4)
+
+        self._paint_qc_markers(p)
 
         # playhead
         x = self.time_to_x(self.playhead)
@@ -306,6 +357,13 @@ class TimelineCanvas(QWidget):
             return
         if e.button() != Qt.MouseButton.LeftButton:
             return
+        marker = self._hit_marker(pos)
+        if marker is not None:  # a QC marker opens its issue (tested before the ruler's playhead drag)
+            self.qc_selected = marker["issue_id"]
+            self.set_playhead(marker["time"])
+            self.marker_clicked.emit(marker["issue_id"])
+            self.update()
+            return
         if pos.y() < RULER_H:
             self._drag = _Drag("playhead")
             self.set_playhead(self.x_to_time(pos.x()))
@@ -324,6 +382,11 @@ class TimelineCanvas(QWidget):
         pos = e.position()
         d = self._drag
         if d is None:
+            marker = self._hit_marker(pos)
+            if marker is not None:
+                QToolTip.showText(e.globalPosition().toPoint(), f"{marker['severity'].title()} · {marker['title']}  (confidence {marker['confidence']:.0f}%)", self)
+                self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                return
             hit = self._hit_clip(pos.x(), pos.y()) if pos.y() >= RULER_H else None
             self.setCursor(QCursor(Qt.CursorShape.SizeHorCursor if hit and hit[2] != "move" else
                                    Qt.CursorShape.OpenHandCursor if hit else Qt.CursorShape.ArrowCursor))

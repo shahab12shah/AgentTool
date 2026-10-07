@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -150,6 +151,7 @@ class TrackHeaders(QWidget):
 
 class TimelinePanel(QWidget):
     preview_requested = Signal(str)  # asset id
+    qc_issue_requested = Signal(str)  # QC issue id (a marker was clicked)
 
     def __init__(self, ctx: UiContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -157,6 +159,7 @@ class TimelinePanel(QWidget):
         self.headers = TrackHeaders(ctx)
         self.canvas = TimelineCanvas(ctx)
         self.canvas.clip_double_clicked.connect(self.preview_requested)
+        self.canvas.marker_clicked.connect(self.qc_issue_requested)
 
         # toolbar
         self.add_track_btn = QPushButton("+ Track")
@@ -168,6 +171,12 @@ class TimelinePanel(QWidget):
         self.add_selected_btn = QPushButton("Add selected media")
         self.add_selected_btn.setToolTip("Adds the media selected in the library at the playhead")
         self.delete_btn = QPushButton("Delete clip")
+        self.marker_mode = QComboBox()
+        self.marker_mode.setObjectName("qcMarkerMode")
+        for label, mode in (("QC markers: show", "all"), ("QC markers: critical only", "critical_only"), ("QC markers: hide", "hidden")):
+            self.marker_mode.addItem(label, mode)
+        self.marker_mode.setToolTip("Quality-control findings on the timeline")
+        self.marker_mode.activated.connect(self._marker_mode_chosen)
         self.time_label = QLabel()
         self.time_label.setObjectName("muted")
         self.zoom = QSlider(Qt.Orientation.Horizontal)
@@ -181,6 +190,7 @@ class TimelinePanel(QWidget):
         bar.addWidget(self.add_track_btn)
         bar.addWidget(self.add_selected_btn)
         bar.addWidget(self.delete_btn)
+        bar.addWidget(self.marker_mode)
         bar.addStretch(1)
         bar.addWidget(self.time_label)
         bar.addWidget(QLabel("Zoom"))
@@ -220,11 +230,29 @@ class TimelinePanel(QWidget):
         for topic in ("project.opened", "project.closed"):
             b.on(topic, lambda p: self.reload())
         b.on("project.changed", lambda p: self.reload() if p.get("scope") in ("timeline", "assets", "waveform", "editing") else None)
+        b.on("project.changed", lambda p: (self.canvas.reload_qc_markers(), self._sync_marker_mode()) if p.get("scope") == "qc" else None)
+        b.on("qc.updated", lambda p: (self.canvas.reload_qc_markers(), self._sync_marker_mode()))
         b.on("selection.changed", lambda p: (self.canvas.update(), self._update_buttons()))
         self.reload()
 
+    def _marker_mode_chosen(self, _index: int) -> None:
+        mode = self.marker_mode.currentData()
+        self.ctx.guard(self, lambda: self.ctx.ws.qc.set_marker_mode(mode))
+        self.canvas.reload_qc_markers()
+
+    def _sync_marker_mode(self) -> None:
+        p = self.ctx.ws.project
+        if p is None:
+            return
+        i = self.marker_mode.findData(p.qc_settings.marker_mode)
+        if i >= 0 and i != self.marker_mode.currentIndex():
+            self.marker_mode.blockSignals(True)
+            self.marker_mode.setCurrentIndex(i)
+            self.marker_mode.blockSignals(False)
+
     def reload(self) -> None:
         self.canvas.reload()
+        self._sync_marker_mode()
         self.headers.reload()
         self._update_time()
         self._update_buttons()
