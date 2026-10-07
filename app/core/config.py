@@ -19,7 +19,7 @@ THEMES = ("dark", "light")
 class Settings:
     autosave_interval_seconds: int = DEFAULT_AUTOSAVE_SECONDS
     default_project_location: str = str(Path.home() / "AgentToolProjects")
-    use_proxies: bool = False  # preference only; proxy generation arrives with the pro preview engine
+    use_proxies: bool = True  # editing previews read proxy media when a proxy exists (exports always read the originals)
     theme: str = "dark"
     ffmpeg_path: str = ""  # empty = discover on PATH
     ffprobe_path: str = ""

@@ -702,7 +702,7 @@ def test_older_projects_migrate_to_schema_5(pres_ws):
         del doc[k]
     doc["schema_version"] = 4
     p = Project.from_document(doc)
-    assert p.schema_version == 5 and p.caption_settings.style_id == "professional" and p.presentation_decisions == {} and p.audio_settings.music_level == 0.18
+    assert p.schema_version == 6 and p.caption_settings.style_id == "professional" and p.presentation_decisions == {} and p.audio_settings.music_level == 0.18
 
 
 def test_autosave_captures_presentation_changes_and_checkpoint_is_written(pres_ws):
@@ -829,7 +829,7 @@ def test_import_audio_tags_music_and_sfx_with_categories(pres_ws, tmp_path):
     ws.presentation.import_audio(f2, "sfx", "camera")
     assert ws.jobs.wait_idle(60)
     by = {a.name: a for a in p.assets.all()}
-    assert by["bed2.wav"].extra["role"] == "music" and by["camera_click.wav"].extra == {"role": "sfx", "category": "CAMERA"}
+    assert by["bed2.wav"].extra["role"] == "music" and {k: v for k, v in by["camera_click.wav"].extra.items() if k != "probe"} == {"role": "sfx", "category": "CAMERA"}
     assert by["bed2.wav"].id in {a.id for a in ws.presentation.library("music")} and by["camera_click.wav"].id in {a.id for a in ws.presentation.library("sfx")}
     with pytest.raises(PresentationError):
         ws.presentation.import_audio(f1, "voice")

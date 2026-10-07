@@ -106,7 +106,7 @@ class AudioMixService:
     @staticmethod
     def volume_expr(gain: float, kfs: list, offset: float = 0.0) -> str:
         """Flat (non-nested) piecewise-linear volume expression in clip-local time; ``offset`` shifts the window start."""
-        T = f"(t+{offset:.4f})" if offset else "t"
+        T = f"(max(t,0)+{offset:.4f})" if offset else "max(t,0)"  # max(t,0) also turns FFmpeg's start-up NaN into 0
         pts = sorted(((k.time, k.value) for k in kfs), key=lambda p: p[0])
         if not pts:
             return f"{gain:.5f}"

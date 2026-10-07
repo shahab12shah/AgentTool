@@ -36,6 +36,10 @@ class JobManager:
     def set_dispatcher(self, dispatcher: Dispatcher) -> None:
         self._dispatch = dispatcher
 
+    def dispatch(self, fn: Callable[[], None]) -> None:
+        """Run ``fn`` where completion callbacks run (the UI thread in the app; the calling thread by default)."""
+        self._dispatch(fn)
+
     # ----- submission -----
     def submit(
         self,

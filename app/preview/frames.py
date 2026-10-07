@@ -19,8 +19,10 @@ STEP = 0.25  # seconds between cached frames of one video
 
 
 class FrameProvider:
-    def __init__(self, project_getter: Callable[[], object], ffmpeg_getter: Callable[[], str]) -> None:
+    def __init__(self, project_getter: Callable[[], object], ffmpeg_getter: Callable[[], str], proxy_getter: Callable[[Asset], Path | None] | None = None) -> None:
         self._project, self._ffmpeg = project_getter, ffmpeg_getter
+        self._proxy = proxy_getter  # editing reads the proxy when there is one: the timeline itself only ever references the asset id
+        self.last_source: Path | None = None
         self._failed: set[str] = set()
 
     def frame_path(self, asset: Asset, src_time: float) -> Path | None:
@@ -28,10 +30,13 @@ class FrameProvider:
         if project is None or project.root is None:
             return None
         src = project.asset_path(asset)
+        if asset.type is AssetType.IMAGE:
+            return src if src.is_file() else None
+        proxy = self._proxy(asset) if (self._proxy and asset.type is AssetType.VIDEO) else None
+        if proxy is not None and proxy.is_file():
+            src = proxy
         if not src.is_file():
             return None
-        if asset.type is AssetType.IMAGE:
-            return src
         if asset.type is not AssetType.VIDEO:
             return None
         q = round(max(0.0, min(src_time, (asset.duration or src_time) - 0.05)) / STEP) * STEP
@@ -43,6 +48,7 @@ class FrameProvider:
             return None
         try:
             out.parent.mkdir(parents=True, exist_ok=True)
+            self.last_source = src
             exe = locate_binary("ffmpeg", self._ffmpeg())
             r = run_process([exe, "-y", "-v", "error", "-ss", f"{q:.2f}", "-i", str(src), "-frames:v", "1", "-vf", "scale=960:-2", str(out)], timeout=15)
             if r.returncode == 0 and out.is_file():

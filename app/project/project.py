@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -115,6 +116,9 @@ class Project:
     presentation_overrides: list[PresentationOverride] = field(default_factory=list)
     presentation_generation: PresentationGeneration = field(default_factory=PresentationGeneration)
     presentation_sessions: list[PresentationSession] = field(default_factory=list)
+    # Phase 6: rendering (the project never contains rendered media: only what was rendered, with which settings, from which timeline)
+    render_history: list[dict[str, Any]] = field(default_factory=list)
+    proxies: dict[str, dict[str, Any]] = field(default_factory=dict)  # asset_id -> ProxyRecord (see rendering/proxy.py)
     schema_version: int = SCHEMA_VERSION
     application_version: str = APP_VERSION
     # Runtime-only state (never serialised):
@@ -282,6 +286,8 @@ class Project:
             "presentation_overrides": to_plain(self.presentation_overrides),
             "presentation_generation": to_plain(self.presentation_generation),
             "presentation_sessions": to_plain(self.presentation_sessions[-50:]),
+            "render_history": copy.deepcopy(self.render_history[-200:]),
+            "proxies": copy.deepcopy(self.proxies),
             "counters": {"asset": self.assets.counter},
         }
 
@@ -332,6 +338,8 @@ class Project:
                 presentation_overrides=[from_plain(PresentationOverride, v) for v in doc["presentation_overrides"]],
                 presentation_generation=from_plain(PresentationGeneration, doc["presentation_generation"]) if doc["presentation_generation"] else PresentationGeneration(),
                 presentation_sessions=[from_plain(PresentationSession, v) for v in doc["presentation_sessions"]],
+                render_history=list(doc.get("render_history", [])),
+                proxies=dict(doc.get("proxies", {})),
                 assets=AssetRegistry(
                     [Asset.from_dict(a) for a in doc["assets"]], counter=int((doc.get("counters") or {}).get("asset", 0))
                 ),

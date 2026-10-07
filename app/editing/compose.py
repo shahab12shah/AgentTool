@@ -145,18 +145,18 @@ class PreviewComposer:
         asset = self.p.assets.get(c.asset_id) if c.asset_id else None
         local = t - c.timeline_start
         kf = c.keyframes
-        scale = c.scale * value_at(kf, "scale", local)
-        x = c.position[0] + value_at(kf, "position_x", local)
-        y = c.position[1] + value_at(kf, "position_y", local)
+        reduced = bool(getattr(self.p, "caption_settings", None) and self.p.caption_settings.reduced_motion)
+        k_scale, k_x, k_y = value_at(kf, "scale", local), value_at(kf, "position_x", local), value_at(kf, "position_y", local)
+        if reduced and c.kind == "media":  # accessibility: strong zooms and drifts (the keyframed motion) are softened; the clip's own scale and position are not
+            k_scale, k_x, k_y = 1.0 + (k_scale - 1.0) * 0.4, k_x * 0.4, k_y * 0.4
+        scale = c.scale * k_scale
+        x = c.position[0] + k_x
+        y = c.position[1] + k_y
         op = c.opacity * value_at(kf, "opacity", local)
         layer = Layer(c.kind, c.id, track_id, c.asset_id, c.source_in + local * c.speed, x, y, scale, c.rotation + value_at(kf, "rotation", local), op,
                       value_at(kf, "blur", local), 1.0, c.effects.get("fit", "cover"), c.text, (c.effects.get("highlight") if c.kind == "graphic" else None),
                       "main", bool(asset and asset.type is AssetType.IMAGE), c.locked, c.created_by)
         out = [layer]
-        reduced = bool(getattr(self.p, "caption_settings", None) and self.p.caption_settings.reduced_motion)
-        if reduced and c.kind == "media":  # accessibility: strong zooms are softened in the preview (the data is unchanged)
-            layer.scale = 1.0 + (layer.scale - 1.0) * 0.4
-            layer.x, layer.y = layer.x * 0.4, layer.y * 0.4
         if c.kind in ("text", "graphic", "caption"):
             from app.presentation.animation import animation_state, counter_text
 

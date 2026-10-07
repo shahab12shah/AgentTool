@@ -4,7 +4,7 @@ from __future__ import annotations
 
 APP_NAME = "AgentTool"
 APP_VERSION = "0.1.0"
-SCHEMA_VERSION = 5  # 5 = Phase 5 (audio, captions, graphics); 4 = Phase 4 (AI editing: decisions, strategy, generation state); 2 = Phase 2 (transcription, scenes, intents); 3 = Phase 3 (visual research, candidates, assignments)
+SCHEMA_VERSION = 6  # 6 = Phase 6 (render settings, render history, proxies); 5 = Phase 5 (audio, captions, graphics); 4 = Phase 4 (AI editing: decisions, strategy, generation state); 2 = Phase 2 (transcription, scenes, intents); 3 = Phase 3 (visual research, candidates, assignments)
 
 PROJECT_FILE = "project.json"
 PROJECT_BACKUP_SUFFIX = ".bak"
@@ -25,9 +25,9 @@ PROJECT_SUBDIRS: tuple[str, ...] = (
     "cache",
 )
 
-VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".mkv", ".webm"})
-IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp"})
-AUDIO_EXTENSIONS = frozenset({".wav", ".mp3", ".aac", ".m4a"})
+VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".avi"})
+IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"})
+AUDIO_EXTENSIONS = frozenset({".wav", ".mp3", ".aac", ".m4a", ".flac"})
 
 # Project creation options.
 RESOLUTION_PRESETS: dict[str, tuple[int, int]] = {

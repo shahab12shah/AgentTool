@@ -177,7 +177,7 @@ def build_asset(asset_id: str, prepared: PreparedMedia, *, source_type: SourceTy
         path=prepared.stored_path,
         name=name or prepared.source.name,
         source_url=source_url,
-        extra=dict(extra or {}),
+        extra={**({"probe": dict(info.extra)} if info.extra else {}), **dict(extra or {})},
         duration=info.duration,
         width=info.width,
         height=info.height,

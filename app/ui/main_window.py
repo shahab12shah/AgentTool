@@ -246,6 +246,7 @@ class MainWindow(QMainWindow):
         self.timeline_panel.preview_requested.connect(self.preview_asset)
         self.script_panel.analyze_requested.connect(lambda: self.go_to("Scenes"))
         self.project_view.open_requested.connect(self.open_project)
+        self.export_panel.return_to_editor.connect(lambda: self.go_to("Timeline"))
         self.project_view.close_requested.connect(self.close_project)
         for topic in ("project.opened", "project.closed", "project.dirty_changed", "project.saved"):
             b.on(topic, lambda p: self._sync_state())
@@ -317,7 +318,7 @@ class MainWindow(QMainWindow):
         if name == "Audio & Captions":
             self.presentation_panel.refresh()
         if name == "Export":
-            self.export_panel.check()
+            self.export_panel.refresh()
 
     def _place_shared(self, page: str) -> None:
         """The library and preview exist once; show them on whichever page needs them."""

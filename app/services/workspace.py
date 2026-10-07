@@ -29,7 +29,6 @@ from app.project.project_commands import SetScriptCommand
 from app.project.project_manager import ProjectManager
 from app.project.project_schema import ProjectSettings
 from app.project.recovery import RecoveryEntry, RecoveryManager
-from app.rendering.renderer import FFmpegRenderer, Renderer
 from app.services.media_service import MediaService
 from app.services.scene_service import SceneService
 from app.services.timeline_service import TimelineService
@@ -39,6 +38,7 @@ from app.visual.research import VisualResearchService
 from app.services.research_service import ResearchService
 from app.services.editing_service import EditingService
 from app.services.presentation_service import PresentationService
+from app.services.render_service import RenderService
 from app.project.phase2_commands import SetVisualPreferencesCommand
 from app.storage.paths import AppPaths
 
@@ -64,7 +64,6 @@ class Workspace:
             self.recovery, on_error=lambda msg: self.bus.publish(Topics.ERROR, message=msg, title="Autosave")
         )
         self.ai = AIProviderRegistry()
-        self.renderer: Renderer = FFmpegRenderer(self.settings.ffmpeg_path)
 
         self.media = MediaService(
             self.projects, self.commands, self.jobs, self.importer, self.thumbnails, self.bus, self.apply_command
@@ -78,6 +77,8 @@ class Workspace:
                                       lambda pid: self.paths.data_dir / "checkpoints" / pid)
         self.presentation = PresentationService(self.projects, self.commands, self.jobs, self.bus, self.apply_command, lambda: self.settings.ffmpeg_path,
                                                 self.media, self.editing._checkpoint)
+        self.render = RenderService(self.projects, self.jobs, self.bus, self.apply_command, self.commands.execute, lambda: self.settings, self.media, self.editing._checkpoint,
+                                    lambda project: self.autosave.request(project, force=True))
         self.timeline.edit_hook = self._edit_hook
         self.selected_clip_id: str | None = None
 
@@ -244,7 +245,7 @@ class Workspace:
         self.settings = settings
         self.prober.configure(settings.ffprobe_path)  # providers read settings lazily through getters
         self.thumbnails.configure(settings.ffmpeg_path)
-        self.renderer = FFmpegRenderer(settings.ffmpeg_path)
+        self.render.reconfigure()
         self.bus.publish(Topics.STATUS, message="Settings saved")
 
     def describe_ffmpeg(self, configured_path: str = "") -> str:
@@ -261,5 +262,6 @@ class Workspace:
         project = self.projects.current
         if project is not None and not project.dirty:
             self.autosave.clear(project.project_id)  # clean exit leaves no recovery data
+        self.render.shutdown()
         self.jobs.shutdown()
         self.autosave.shutdown()

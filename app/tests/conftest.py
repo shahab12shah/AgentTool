@@ -161,3 +161,20 @@ def pres_ws(edit_ws, tmp_path):
     ws.editing.generate()
     assert ws.jobs.wait_idle(60)
     return ws
+
+
+@pytest.fixture
+def render_engine():
+    from app.rendering.engine import RenderEngine
+
+    return RenderEngine()
+
+
+@pytest.fixture
+def render_ws(project_ws, tmp_path):
+    """Phase 6 starting point: a project whose timeline has video, B-roll, an image, text, captions, voice, music and SFX (see render_helpers.build_demo)."""
+    from app.tests.render_helpers import build_demo
+
+    ws = project_ws
+    ws.demo = build_demo(ws, tmp_path)
+    return ws

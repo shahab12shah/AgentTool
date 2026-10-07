@@ -520,7 +520,7 @@ def test_older_projects_migrate_and_open(edit_ws):
     doc["schema_version"] = 3
     doc["timeline"]["tracks"] = [t for t in doc["timeline"]["tracks"] if t["id"] != "track_v6"]
     p = Project.from_document(doc)
-    assert p.schema_version == 5 and any(t.id == "track_v6" for t in p.timeline.tracks) and p.timeline_version == 0 and p.editing_decisions == {}
+    assert p.schema_version == 6 and any(t.id == "track_v6" for t in p.timeline.tracks) and p.timeline_version == 0 and p.editing_decisions == {}
 
 
 # ============================================================ missing visuals / media

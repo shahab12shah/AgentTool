@@ -30,6 +30,9 @@ class Topics:
     JOB_ADDED = "job.added"
     JOB_UPDATED = "job.updated"
     THUMBNAIL_READY = "media.thumbnail_ready"
+    RENDER_UPDATED = "render.updated"  # payload: job (RenderJob)
+    RENDER_HISTORY_CHANGED = "render.history_changed"
+    PROXY_CHANGED = "proxy.changed"  # payload: asset_id
     ERROR = "app.error"  # payload: message, details
     STATUS = "app.status"  # payload: message
 

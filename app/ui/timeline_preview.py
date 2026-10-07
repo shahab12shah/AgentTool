@@ -20,7 +20,8 @@ class TimelinePreview(QWidget):
         self.time = 0.0
         self.frame: FrameState | None = None
         self._pix: dict[str, QPixmap] = {}
-        self.frames = FrameProvider(lambda: ctx.ws.project, lambda: ctx.ws.settings.ffmpeg_path)
+        self.frames = FrameProvider(lambda: ctx.ws.project, lambda: ctx.ws.settings.ffmpeg_path,
+                                    lambda a: ctx.ws.render.proxies.proxy_path_for(a) if ctx.ws.settings.use_proxies else None)
         self.setMinimumSize(480, 270)
         self.setObjectName("timelinePreview")
 

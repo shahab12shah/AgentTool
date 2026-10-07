@@ -148,7 +148,7 @@ def test_approval_makes_the_assignment_final_and_survives_save_and_reopen(rws):
         assert q.to_document()[key] == doc[key], key
     a = q.visual_assignments[sid]
     assert a.approved and a.selected_by == "USER" and q.assets.get(a.asset_id) and q.research_status[sid].status is ResearchStatus.APPROVED
-    assert q.schema_version == 5
+    assert q.schema_version == 6
 
 
 def test_user_can_choose_a_lower_scored_candidate_and_is_recorded_as_the_selector(rws):

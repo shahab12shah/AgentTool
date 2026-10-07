@@ -128,4 +128,13 @@ class MediaProber:
             if duration is None or duration <= 0:
                 raise MediaProbeError(f"Could not determine the duration of “{path.name}”.")
             info.duration = duration
+        try:  # Phase 6: the renderer's extra facts (rotation, pixel format, alpha, container, bitrate, frame count)
+            from app.rendering.probe import parse_probe
+
+            full = parse_probe(path, data)
+            info.extra = full.extra()
+            if full.rotation in (90, 270) and info.width and info.height:
+                info.extra["display_width"], info.extra["display_height"] = info.height, info.width
+        except Exception:  # extras are optional; the basic facts above are enough to import
+            _log.debug("extended probe failed", exc_info=True)
         return info

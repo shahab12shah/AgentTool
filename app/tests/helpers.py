@@ -251,11 +251,11 @@ def make_image(path: Path, kind: str = "testsrc", size: str = "320x180") -> Path
     return path
 
 
-def make_video(path: Path, seconds: float = 4.0, kind: str = "testsrc") -> Path:
+def make_video(path: Path, seconds: float = 4.0, kind: str = "testsrc", size: str = "640x360", rate: int = 24, extra: list[str] | None = None) -> Path:
     import subprocess
 
-    src = {"testsrc": "testsrc=size=640x360:rate=24", "testsrc2": "testsrc2=size=640x360:rate=24", "mandel": "mandelbrot=size=640x360:rate=24"}[kind]
-    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", f"{src}:duration={seconds}", "-pix_fmt", "yuv420p", str(path)], check=True)
+    src = {"testsrc": "testsrc=size={s}:rate={r}", "testsrc2": "testsrc2=size={s}:rate={r}", "mandel": "mandelbrot=size={s}:rate={r}"}[kind].format(s=size, r=rate)
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", f"{src}:duration={seconds}", "-pix_fmt", "yuv420p", *(extra or []), str(path)], check=True)
     return path
 
 

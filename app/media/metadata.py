@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.core.constants import AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
@@ -51,3 +51,4 @@ class MediaInfo:
     audio_codec: str | None = None
     sample_rate: int | None = None
     channels: int | None = None
+    extra: dict = field(default_factory=dict)  # pix_fmt, bitrate, rotation, container, frame_count... (Phase 6 probe facts)

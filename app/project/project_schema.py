@@ -67,28 +67,50 @@ class VoiceOverData:
 
 @dataclass
 class RenderSettings:
-    container: str = "mp4"
-    video_codec: str = "h264"
-    audio_codec: str = "aac"
-    crf: int = 18
+    """What the user last chose in the Export screen. Saved with the project; the renderer reads a frozen copy (see ``RenderSnapshot``).
+
+    Zero / empty means "follow the project" or "derive from ``quality``", so the same settings keep working when the project changes.
+    """
+
+    preset_id: str = "youtube_1080p"  # youtube_1080p | youtube_4k | high_quality | draft | custom
+    resolution: str = "1080p"  # short edge: 480p | 720p | 1080p | 2160p (aspect ratio always follows the project)
+    fps: int = 0  # 0 = the project FPS (the master output rate)
+    quality: str = "high"  # draft | standard | high | maximum | custom
+    container: str = "mp4"  # mp4 | mkv | webm
+    video_codec: str = "h264"  # h264 | h265 | vp9 | av1
+    audio_codec: str = "aac"  # aac | opus | flac
+    crf: int = 0  # custom quality only (0 = automatic)
+    bitrate_kbps: int = 0  # custom quality only; 0 = constant quality (CRF)
+    audio_bitrate_kbps: int = 192
+    audio_sample_rate: int = 48000
+    encoder_preset: str = ""  # codec specific speed/efficiency preset; "" = from quality
+    hardware_acceleration: str = "auto"  # auto | cpu | hardware
+    output_dir: str = ""  # "" = <project>/renders
+    use_proxies: bool = False  # explicit opt-in: export from proxy media (never the default)
+    proxy_resolution: str = "720p"  # 540p | 720p | 1080p
+    duration_tolerance: float = 0.5  # seconds of allowed difference between timeline and rendered duration
+
+    @property
+    def output_format(self) -> str:
+        return self.container
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "container": self.container,
-            "video_codec": self.video_codec,
-            "audio_codec": self.audio_codec,
-            "crf": self.crf,
-        }
+        from dataclasses import asdict
+
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "RenderSettings":
+        from dataclasses import fields
+
         base = cls()
-        return cls(
-            d.get("container", base.container),
-            d.get("video_codec", base.video_codec),
-            d.get("audio_codec", base.audio_codec),
-            int(d.get("crf", base.crf)),
-        )
+        kw = {}
+        for f in fields(cls):
+            if f.name in d:
+                kw[f.name] = type(getattr(base, f.name))(d[f.name]) if not isinstance(getattr(base, f.name), bool) else bool(d[f.name])
+        if "crf" in kw and "quality" not in d:  # Phase 1 documents stored crf=18 without a quality level: keep it as a custom choice
+            kw["quality"] = "custom"
+        return cls(**kw)
 
 
 @dataclass
@@ -181,6 +203,11 @@ def migrate_document(doc: dict[str, Any]) -> dict[str, Any]:
                            ("presentation_overrides", []), ("presentation_generation", {}), ("presentation_sessions", [])):
             doc.setdefault(key, empty)
         doc["schema_version"] = 5
+        version = 5
+    if version == 5:  # Phase 5 -> Phase 6: render history and proxy mapping (render_settings fields are additive)
+        doc.setdefault("render_history", [])
+        doc.setdefault("proxies", {})
+        doc["schema_version"] = 6
     return doc
 
 
@@ -240,6 +267,10 @@ _V5_SECTIONS: dict[str, type] = {
     "presentation_generation": dict,
     "presentation_sessions": list,
 }
+_V6_SECTIONS: dict[str, type] = {
+    "render_history": list,
+    "proxies": dict,
+}
 
 
 def validate_document(doc: Any) -> None:
@@ -257,7 +288,7 @@ def validate_document(doc: Any) -> None:
         )
     elif version < 1:
         problems.append(f"unsupported schema_version {version}")
-    for key, typ in {**_REQUIRED_SECTIONS, **(_V2_SECTIONS if isinstance(version, int) and version >= 2 else {}), **(_V3_SECTIONS if isinstance(version, int) and version >= 3 else {}), **(_V4_SECTIONS if isinstance(version, int) and version >= 4 else {}), **(_V5_SECTIONS if isinstance(version, int) and version >= 5 else {})}.items():
+    for key, typ in {**_REQUIRED_SECTIONS, **(_V2_SECTIONS if isinstance(version, int) and version >= 2 else {}), **(_V3_SECTIONS if isinstance(version, int) and version >= 3 else {}), **(_V4_SECTIONS if isinstance(version, int) and version >= 4 else {}), **(_V5_SECTIONS if isinstance(version, int) and version >= 5 else {}), **(_V6_SECTIONS if isinstance(version, int) and version >= 6 else {})}.items():
         if key not in doc:
             problems.append(f"missing section '{key}'")
         elif not isinstance(doc[key], typ):

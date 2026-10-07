@@ -13,7 +13,6 @@ from app.core.events import EventBus
 from app.core.exceptions import NotAvailableInPhase
 from app.core.timecode import format_duration_short, format_timecode
 from app.logging.logger import get_logger, log_event, redact, setup_logging
-from app.rendering.renderer import FFmpegRenderer
 from app.tests.conftest import import_and_wait, needs_ffmpeg
 
 
@@ -52,11 +51,11 @@ def test_update_settings_persists_and_applies_ffmpeg_path(project_ws):
     s.ffmpeg_path = "/nonexistent/ffmpeg"
     ws.update_settings(s)
     assert SettingsStore(ws.paths.settings_file).load().ffmpeg_path == "/nonexistent/ffmpeg"  # persisted
-    issues = ws.renderer.validate(ws.project)  # renderer picked up the new path
-    assert any("configured ffmpeg path" in i.message for i in issues)
+    ff = ws.render.preflight().item("ffmpeg")  # the render engine picked up the new path
+    assert ff.status == "error" and "configured ffmpeg path" in ff.message
     s.ffmpeg_path = ""
     ws.update_settings(s)
-    assert not any("configured" in i.message for i in ws.renderer.validate(ws.project))
+    assert ws.render.preflight().item("ffmpeg").status == "ok"
 
 
 # ---------------------------------------------------------------- logging
@@ -149,27 +148,27 @@ def test_ai_provider_is_explicitly_unavailable():
 
 
 @needs_ffmpeg
-def test_renderer_validates_and_plans_but_does_not_fake_rendering(project_ws, media_dir, tmp_path):
+def test_preflight_reports_empty_timeline_and_missing_media(project_ws, media_dir):
     ws = project_ws
-    r = ws.renderer
-    assert any("empty" in i.message for i in r.validate(ws.project))
+    rep = ws.render.preflight()
+    assert not rep.can_start and any("empty" in i.message.lower() for i in rep.errors)
     a = import_and_wait(ws, media_dir / "clip.mp4")
     ws.timeline.add_asset(a.id)
-    assert r.validate(ws.project) == []
-    plan = r.build_render_plan(ws.project)
-    assert (plan.width, plan.height, plan.fps) == (1920, 1080, 30) and len(plan.segments) == 1
-    assert plan.segments[0].asset_path.is_file() and plan.duration == pytest.approx(a.duration)
-    with pytest.raises(NotAvailableInPhase):
-        r.render(ws.project, tmp_path / "out.mp4")
-    assert not (tmp_path / "out.mp4").exists()
-    # missing media is reported
+    rep = ws.render.preflight()
+    assert rep.can_start and rep.plan is not None
+    assert rep.plan.output_resolution == (1920, 1080) and rep.plan.fps == 30 and rep.plan.duration == pytest.approx(a.duration)
     ws.project.asset_path(a).unlink()
-    assert any("missing" in i.message.lower() for i in r.validate(ws.project))
+    rep = ws.render.preflight()
+    assert not rep.can_start and rep.item("visuals").status == "error" and a.id in rep.missing_assets
 
 
-def test_renderer_reports_missing_ffmpeg(project_ws):
-    issues = FFmpegRenderer("/definitely/not/here").validate(project_ws.project)
-    assert any(i.severity == "error" and "path" in i.message.lower() for i in issues)
+def test_preflight_reports_missing_ffmpeg(project_ws):
+    from app.core.config import Settings
+
+    ws = project_ws
+    ws.update_settings(Settings(**{**ws.settings.__dict__, "ffmpeg_path": "/definitely/not/here"}))
+    rep = ws.render.preflight()
+    assert not rep.can_start and rep.item("ffmpeg").status == "error" and "path" in rep.item("ffmpeg").message.lower()
 
 
 # ---------------------------------------------------------------- app-level behaviour
