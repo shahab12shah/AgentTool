@@ -16,13 +16,13 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.analysis.models import NumberKind, VisualType
+from app.analysis.models import NumberKind, Scene, VisualType
 from app.core.constants import MIN_CLIP_DURATION
 from app.editing.assembly import subtract
-from app.editing.context import AssetInfo, SceneContext
+from app.editing.context import SceneContext
 from app.editing.models import VisualStatus
 from app.editing.planners import EVIDENCE_SOURCES, is_evidence_visual
-from app.media.asset import Asset, AssetType
+from app.media.asset import AssetType
 from app.qc import fix_catalog
 from app.qc.checker_base import BaseChecker, CheckerOutput
 from app.qc.context import ProgressFn, QCContext, sha
@@ -84,10 +84,6 @@ def _moves(c: Clip) -> bool:
     return sum(1 for k in c.keyframes if k.property in ("scale", "position_x", "position_y")) >= 2
 
 
-def _info(a: Asset | None) -> AssetInfo | None:
-    return AssetInfo(a.id, a.type, a.duration, a.width, a.height, a.source_type.value, a.name) if a is not None else None
-
-
 @dataclass
 class _Shot:
     """A stretch of one continuous picture as the viewer sees it (the topmost opaque clip); ``ext_*`` are its real limits, which may reach past the scene."""
@@ -107,6 +103,12 @@ class _Shot:
 class _Picture:
     shots: list[_Shot]
     overlap_seconds: float  # time with two or more opaque full pictures on screen at once
+    track_of: dict[str, Track] = field(default_factory=dict)  # clip id -> the track it is on
+
+    def owner(self, ctx: QCContext, clips: list[Clip]) -> tuple[Clip, Track | None]:
+        """The clip a finding about a shot is anchored to: one the user owns / locked if there is one (so its protection applies), else the first."""
+        pick = next((c for c in clips if ctx.is_protected(self.track_of.get(c.id), c)[0]), clips[0])
+        return pick, self.track_of.get(pick.id)
 
 
 def _same_picture(a: Clip, b: Clip, still: bool) -> bool:
@@ -145,12 +147,14 @@ class SceneChecker(BaseChecker):
     def run(self, ctx: QCContext, report: ProgressFn) -> CheckerOutput:
         out = CheckerOutput()
         scenes = ctx.target_scenes()
-        vis = [(t, c) for t, c in ctx.visual_clips() if _on_screen(t, c)]
+        every = ctx.visual_clips()  # every media clip on a picture track (the approved visual may sit on a hidden track: that is a coverage problem, not "missing")
+        vis = [(t, c) for t, c in every if _on_screen(t, c)]
+        placed = [c for _t, c in every]
         rows: dict[str, dict[str, Any]] = {}
         for i, s in enumerate(scenes):
             ctx.check_cancel()
             report(i / max(1, len(scenes)), f"Scene {s.label}")
-            out.issues.extend(self._scene(ctx, s, vis, rows))
+            out.issues.extend(self._scene(ctx, s, vis, placed, rows))
         covered = [r["coverage_ratio"] for r in rows.values() if r["narration_seconds"] > 0]
         out.metrics = {
             "scenes_checked": len(rows), "scene_rows": rows, "coverage_ratio_mean": round(sum(covered) / len(covered), 4) if covered else 1.0,
@@ -162,7 +166,7 @@ class SceneChecker(BaseChecker):
         return out
 
     # ------------------------------------------------------------------ one scene
-    def _scene(self, ctx: QCContext, s, vis: list[tuple[Track, Clip]], rows: dict[str, dict[str, Any]]) -> list[QCIssue]:
+    def _scene(self, ctx: QCContext, s: Scene, vis: list[tuple[Track, Clip]], placed: list[Clip], rows: dict[str, dict[str, Any]]) -> list[QCIssue]:
         p = ctx.project
         fr, lo, hi = ctx.frame, float(s.start), float(s.end)
         sc = ctx.scene_ctx(s.id)
@@ -188,7 +192,7 @@ class SceneChecker(BaseChecker):
         rows[s.id] = row
 
         short_of_ratio = active_s > fr and ratio < ctx.settings.coverage.min_covered_ratio - 1e-9 and unc_s >= fr
-        on_timeline = self._placed(ctx, s, a)
+        on_timeline = self._placed(ctx, s, a, placed)
         not_placed = a is not None and a.approved and not skipped and bool(a.asset_id) and ctx.asset(a.asset_id) is not None and status == VisualStatus.APPROVED.value and not on_timeline
         if not_placed:
             issues.append(self._not_on_timeline(ctx, s, a, inside, main, unc_s, active_s, uncovered, ratio, short_of_ratio))
@@ -205,7 +209,7 @@ class SceneChecker(BaseChecker):
         return issues
 
     # ------------------------------------------------------------------ narration activity
-    def _active(self, ctx: QCContext, s) -> list[tuple[float, float]]:
+    def _active(self, ctx: QCContext, s: Scene) -> list[tuple[float, float]]:
         """The stretches of the scene in which the narration is playing: word spans bridged across pauses shorter than the sentence-split pause (longer pauses are deliberate and
         need no picture), minus the gaps the user declared intentional. Without any transcript the whole scene counts."""
         lo, hi = float(s.start), float(s.end)
@@ -258,21 +262,21 @@ class SceneChecker(BaseChecker):
         for sh in shots:  # a shot that touches the scene edge goes on in the neighbouring scene: its true length is that of its clips
             sh.ext_start = min(c.timeline_start for c in sh.clips) if sh.start <= lo + 1e-6 else sh.start
             sh.ext_end = max(c.timeline_end for c in sh.clips) if sh.end >= hi - 1e-6 else sh.end
-        return _Picture(shots, overlap)
+        return _Picture(shots, overlap, {c.id: t for t, c in inside})
 
     # ------------------------------------------------------------------ coverage
-    def _placed(self, ctx: QCContext, s, a) -> bool:
+    def _placed(self, ctx: QCContext, s: Scene, a, placed: list[Clip]) -> bool:
         """The approved visual is on the timeline somewhere in this scene (any visual track, visible or not: visibility is judged by the coverage)."""
         if a is None or not a.asset_id:
             return True
-        return any(c.asset_id == a.asset_id and c.timeline_end > s.start + ctx.frame and c.timeline_start < s.end - ctx.frame for _t, c in ctx.visual_clips())
+        return any(c.asset_id == a.asset_id and c.timeline_end > s.start + ctx.frame and c.timeline_start < s.end - ctx.frame for c in placed)
 
     @staticmethod
     def _cause(status: str) -> str:
         return {VisualStatus.UNAPPROVED.value: "A visual was chosen for this scene but not approved yet.", VisualStatus.MISSING_MEDIA.value: "The approved visual's media file cannot be found.",
                 VisualStatus.MISSING.value: "No visual is assigned to this scene."}.get(status, "The visual does not run for the whole narration.")
 
-    def _missing(self, ctx: QCContext, s, status: str, skipped: bool, unc_s: float, active_s: float, uncovered, ratio: float, inside) -> QCIssue:
+    def _missing(self, ctx: QCContext, s: Scene, status: str, skipped: bool, unc_s: float, active_s: float, uncovered, ratio: float, inside) -> QCIssue:
         pct = 100.0 * (1.0 - ratio)
         if skipped:
             title, why, suggested, impact = INFO["scene.coverage.skipped"]
@@ -297,7 +301,7 @@ class SceneChecker(BaseChecker):
                           viewer_impact=min(1.0, impact + 0.2 * min(1.0, unc_s / max(active_s, 1e-6))), signature=f"{'whole' if whole else round(unc_s)}",
                           metrics={"uncovered_seconds": round(unc_s, 3), "coverage_ratio": round(ratio, 4), "visual_status": status}, ctx=ctx)
 
-    def _not_on_timeline(self, ctx: QCContext, s, a, inside, main, unc_s: float, active_s: float, uncovered, ratio: float, short_of_ratio: bool) -> QCIssue:
+    def _not_on_timeline(self, ctx: QCContext, s: Scene, a, inside, main, unc_s: float, active_s: float, uncovered, ratio: float, short_of_ratio: bool) -> QCIssue:
         title, why, suggested, impact = INFO["scene.visual.not_on_timeline"]
         asset = ctx.asset(a.asset_id)
         shown = sorted({_name(ctx, c) for _t, c in inside})
@@ -330,7 +334,7 @@ class SceneChecker(BaseChecker):
         intent = ctx.project.visual_intents.get(sc.scene.id) if sc else None
         return bool(intent is not None and intent.type in (VisualType.EVIDENCE, VisualType.DATA) and asset.type is AssetType.IMAGE)
 
-    def _holds(self, ctx: QCContext, s, sc: SceneContext | None, a, pic: _Picture, row: dict[str, Any]) -> list[QCIssue]:
+    def _holds(self, ctx: QCContext, s: Scene, sc: SceneContext | None, a, pic: _Picture, row: dict[str, Any]) -> list[QCIssue]:
         fr = ctx.frame
         cov = ctx.settings.coverage
         warn_factor = _opt(ctx, "hold_warning_factor", HOLD_WARNING_FACTOR)
@@ -338,9 +342,8 @@ class SceneChecker(BaseChecker):
         for sh in pic.shots:
             if sh.ext_start < s.start - fr:
                 continue  # a hold that began in an earlier scene is that scene's finding
-            clip = sh.clips[0]
+            clip, track = pic.owner(ctx, sh.clips)
             asset = ctx.asset(clip.asset_id)
-            track = next((t for t in ctx.timeline.tracks if t.id == clip.track_id), None)
             still = (track is not None and track.kind is TrackKind.IMAGE) or (asset is not None and asset.type is AssetType.IMAGE)
             limit = cov.max_hold_still_seconds if (still and not _moves(clip)) else cov.max_hold_seconds
             row["longest_hold"] = max(row["longest_hold"], round(sh.length, 3))
@@ -359,7 +362,7 @@ class SceneChecker(BaseChecker):
         return out
 
     # ------------------------------------------------------------------ fragmentation
-    def _fragmentation(self, ctx: QCContext, s, sc: SceneContext | None, pic: _Picture, row: dict[str, Any]) -> list[QCIssue]:
+    def _fragmentation(self, ctx: QCContext, s: Scene, sc: SceneContext | None, pic: _Picture, row: dict[str, Any]) -> list[QCIssue]:
         fr = ctx.frame
         cov = ctx.settings.coverage
         out: list[QCIssue] = []
@@ -382,8 +385,8 @@ class SceneChecker(BaseChecker):
             if n <= allowed:
                 continue
             row["fragmented_sentences"] += 1
-            clip = next((sh.clips[0] for sh in shots if sh.end > lo + fr), None)
-            track = next((t for t in ctx.timeline.tracks if clip is not None and t.id == clip.track_id), None)
+            first = next((sh for sh in shots if sh.end > lo + fr), None)
+            clip, track = pic.owner(ctx, first.clips) if first is not None else (None, None)
             out.append(self.issue("scene.fragmentation.cuts", CAT, W if n >= allowed + 2 else N, title, scene_id=s.id, clip=clip, track=track, start=lo, end=hi,
                                   description=f"The sentence \"{sent.text.strip()[:60]}\" ({_t(lo)}-{_t(hi)}, {len(sent.word_ids)} words) is cut {n} times; up to {allowed:g} is the limit.",
                                   why=why, current=f"{n} visual changes in {hi - lo:.1f} s", recommended=f"at most {allowed:g} visual changes", suggested_fix=suggested,
@@ -396,8 +399,7 @@ class SceneChecker(BaseChecker):
 
         def flush() -> None:
             if len(run) >= need and run[0].ext_start >= s.start - fr:  # reported by the scene the cluster starts in
-                clip = run[0].clips[0]
-                track = next((t for t in ctx.timeline.tracks if t.id == clip.track_id), None)
+                clip, track = pic.owner(ctx, [c for x in run for c in x.clips])
                 a0, b0 = run[0].ext_start, run[-1].ext_end
                 out.append(self.issue("scene.fragmentation.short_shots", CAT, W, title, scene_id=s.id, clip=clip, track=track, start=a0, end=b0,
                                       description=f"{len(run)} shots in a row are shorter than {min_shot:g} s ({_t(a0)}-{_t(b0)}; shortest {min(x.length for x in run):.2f} s).", why=why,
@@ -416,7 +418,7 @@ class SceneChecker(BaseChecker):
         return out
 
     # ------------------------------------------------------------------ important statements
-    def _support(self, ctx: QCContext, s, sc: SceneContext | None, a, main, inside: list[tuple[Track, Clip]]) -> QCIssue | None:
+    def _support(self, ctx: QCContext, s: Scene, sc: SceneContext | None, a, main, inside: list[tuple[Track, Clip]]) -> QCIssue | None:
         cov = ctx.settings.coverage
         if float(s.importance) < cov.important_scene - 1e-9:
             return None
@@ -443,21 +445,16 @@ class SceneChecker(BaseChecker):
             return None
         if any(self._evidence(ctx, sc, a, c) for _t, c in inside):
             return None  # an evidence / data visual (or a highlighted clip) is on screen
-        treated = [c for t, c in ctx.clips(track_kinds=(TrackKind.GRAPHICS, TrackKind.TEXT)) if not self._track_hidden(ctx, c) and c.kind in (KIND_TEXT, KIND_GRAPHIC)
-                   and min(c.timeline_end, s.end) - max(c.timeline_start, s.start) >= MIN_TREATMENT_SECONDS and (c.kind == KIND_GRAPHIC or str((c.text or {}).get("content", "")).strip())]
-        if treated:
-            return None
+        shown = ctx.memo("scene.treatments", lambda: [c for t, c in ctx.clips(track_kinds=(TrackKind.GRAPHICS, TrackKind.TEXT)) if not t.hidden and c.kind in (KIND_TEXT, KIND_GRAPHIC)
+                                                     and (c.kind == KIND_GRAPHIC or str((c.text or {}).get("content", "")).strip())])
+        if any(min(c.timeline_end, s.end) - max(c.timeline_start, s.start) >= MIN_TREATMENT_SECONDS for c in shown):
+            return None  # a text / number / highlight element is on screen during the scene
         title, why, suggested, impact = INFO["scene.support.under_supported"]
         conf = min(85.0, conf + 4.0 * (len(reasons) - 1))
-        shown = _name(ctx, main[1]) if main else "the current visual"
+        current = _name(ctx, main[1]) if main else "the current visual"
         return self.issue("scene.support.under_supported", CAT, W, title, scene_id=s.id, clip=main[1] if main else None, track=main[0] if main else None, start=s.start, end=s.end, confidence=conf,
-                          description=(f"Potential under-support detected in scene {s.label} (importance {s.importance:.2f}): it contains {'; '.join(reasons)}, but {shown} looks decorative and "
+                          description=(f"Potential under-support detected in scene {s.label} (importance {s.importance:.2f}): it contains {'; '.join(reasons)}, but {current} looks decorative and "
                                        f"no text, number or evidence treatment is on screen. Review recommended."),
                           why=why, current="a generic visual and no text or evidence treatment", recommended="an evidence / data visual, or a text / number treatment on V4 / V5", suggested_fix=suggested,
                           fix=fix_catalog.navigate("visual.replace", "Choose an evidence or data visual for this scene", scene_id=s.id), viewer_impact=min(1.0, impact + 0.3 * (float(s.importance) - cov.important_scene)),
                           signature="|".join(sig), metrics={"triggers": sig}, ctx=ctx)
-
-    @staticmethod
-    def _track_hidden(ctx: QCContext, c: Clip) -> bool:
-        t = next((t for t in ctx.timeline.tracks if t.id == c.track_id), None)
-        return t is None or t.hidden

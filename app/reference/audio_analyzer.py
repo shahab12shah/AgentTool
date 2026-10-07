@@ -64,6 +64,7 @@ MUSIC_ABS_GATE_DB = -65.0  # the floor must be audible: above this and within 42
 MUSIC_REL_GATE_DB = 42.0
 MUSIC_MIN_RUN = 3  # steps (1.5 s): shorter "music" is a tone blip
 MUSIC_FILL_GAP = 2  # steps: a dropout this short (a hit, a loud syllable burst) does not end the bed
+MUSIC_SPEECH_BRIDGE = 10  # steps (5 s): the longest stretch of speech a deeply ducked bed may disappear into and still be the same bed
 
 CPP_LO_HZ, CPP_HI_HZ = 70.0, 4000.0
 CPP_VOICED = 5.0  # cepstral peak / cepstral level: noise, chords and bursts sit at 1.4-3.7, voiced speech at 7-20
@@ -97,10 +98,11 @@ SFX_BAND_GATE_REL_DB = 13.0  # a band burst (high / low band only) must reach wi
                             # high band sits ~20 dB under its loud level, a sibilant ~12-15 dB, a whoosh within a few dB; the stick-out test does the rest)
 SFX_SPEECH_DILATE_S = 0.2  # speech context reaches this far past a speech run (unvoiced consonants hang off its edges)
 SFX_SPEECH_COVER = 0.25  # an event that overlaps speech this much is judged by its band signature only
+SFX_EQUAL_INTENSITY, SFX_INTENSITY_SPAN_DB = 0.75, 24.0  # intensity of an effect as loud as the speech's peaks; dB for the full 0..1 scale
 SFX_ALIGN_BEFORE_S, SFX_ALIGN_AFTER_S = 0.15, 0.4  # an effect is "on" a boundary when it starts up to 0.15 s before .. 0.4 s after it
 
 DUCK_FULL_DB = 12.0  # a drop of this much (or more) = ducking strength 1
-DUCK_MIN_SPEECH_S, DUCK_MIN_GAP_S = 3.0, 2.0  # music-under-speech / music-in-gaps material needed to measure a duck
+DUCK_MIN_SPEECH_S, DUCK_MIN_GAP_S = 3.0, 3.0  # music-under-speech / music-in-gaps material needed to measure a duck
 
 MUSIC_STEP_DB = 5.0  # an abrupt level change of the bed
 MUSIC_TEXTURE_DIST = 0.40  # 1 - cosine similarity of the floor spectra either side of a point: a new chord / instrumentation
@@ -495,8 +497,18 @@ class _Run:
         self.floor_gate = gate
         active = (tf >= TONAL_ACTIVE + TONAL_SPEECH_EXTRA * self.speech_frac) & (self.floor_db >= gate)
         active = _close_gaps(active, MUSIC_FILL_GAP)
+        active = self._bridge_under_speech(active)
         active = _drop_short(active, MUSIC_MIN_RUN)
         self.music = self._extend_music_edges(active)
+
+    def _bridge_under_speech(self, active: np.ndarray) -> np.ndarray:
+        """A bed that is ducked deeply while someone speaks can sink into the voice and drop out of the tonal test for a while. When it is there on both sides
+        of such a stretch (up to 5 s) and the stretch is speech, it is taken to have carried on underneath."""
+        out = active.copy()
+        for a, b in _runs(~active):
+            if a > 0 and b < self.W and b - a <= MUSIC_SPEECH_BRIDGE and float(np.mean(self.speech_frac[a:b] >= 0.5)) >= 0.8:
+                out[a:b] = True
+        return out
 
     def _extend_music_edges(self, active: np.ndarray) -> np.ndarray:
         """The minimum-statistics floor only 'sees' the bed once ~90 % of its window is inside it, so a bed that starts / stops inside the file is found
@@ -573,7 +585,7 @@ class _Run:
                 # is too short to have such steps, smear can only have lowered it, so its best step is the honest one
                 core = [w for w in ws if not self.edge_zone[w]]
                 gap_level[j] = float(np.median(lvl[core])) if len(core) >= 2 else float(np.max(lvl[ws]))
-        drops, sp_time, gap_time = [], 0.0, 0.0
+        drops, sp_time, used = [], 0.0, set()
         for j, v in speech_level.items():
             refs = [gap_level[k] for k in (j - 1, j + 1) if k in gap_level]
             if not refs:
@@ -581,7 +593,8 @@ class _Run:
             drops.append(float(np.max(refs)) - v)  # a gap's level can only be under-read (smear, fades), so the louder neighbour is the honest reference
             _, a, b = runs[j]
             sp_time += sum(1 for w in range(a, b) if m[w]) * STEP_S
-            gap_time += sum(sum(1 for w in range(runs[k][1], runs[k][2]) if m[w]) for k in (j - 1, j + 1) if k in gap_level) * STEP_S
+            used.update(k for k in (j - 1, j + 1) if k in gap_level)
+        gap_time = sum(sum(1 for w in range(runs[k][1], runs[k][2]) if m[w]) for k in used) * STEP_S  # each gap counted once
         if drops and sp_time >= DUCK_MIN_SPEECH_S and gap_time >= DUCK_MIN_GAP_S:
             self.duck_db = max(0.0, float(np.median(drops)))
             self.duck_ok = True
@@ -759,12 +772,13 @@ class _Run:
         self.sfx_times = [round(float(max(0.0, s.tc[int(e[0])] - hs / 2)), 3) for e in ev]
         self.sfx_frames = [(int(e[0]), int(e[1]), int(e[2])) for e in ev]
         self.sfx_per_minute = len(ev) / self.minutes if self.minutes > 0 else 0.0
-        # intensity: the effect's peak foreground level against the speech foreground level (or the file's loud level when nobody speaks)
+        # intensity: the effect's peak level against the speech's peak level (90th percentile of its frames; the file's loud level when nobody speaks):
+        # equal = 0.75, 6 dB louder = 1, 18 dB quieter = 0
         if ev:
-            peak = np.array([_db(float(n_tot[int(e[0]):int(e[1]) + 1].max())) for e in ev])
-            ref_frames = n_tot[self.speech]
-            ref = float(_db(float(np.percentile(ref_frames, 75)))) if self.speech.sum() >= 20 else self.loud
-            self.sfx_intensity = float(np.mean(np.clip(1.0 + (peak - ref) / 20.0, 0.0, 1.0)))
+            has_ref = self.speech.sum() >= 20
+            peak = np.array([_db(self._effect_power(n_tot, int(e[0]), int(e[1]))) for e in ev])
+            ref = float(_db(float(np.percentile(n_tot[self.speech], 90)))) if has_ref else self.loud
+            self.sfx_intensity = float(np.mean(np.clip(SFX_EQUAL_INTENSITY + (peak - ref) / SFX_INTENSITY_SPAN_DB, 0.0, 1.0)))
         else:
             self.sfx_intensity = 0.0
         self.sfx_align = {
@@ -772,6 +786,17 @@ class _Run:
             "text": self._share_on(self.sfx_times, self.texts),
             "reveals": self._share_on(self.sfx_times, self.changes),
         }
+
+    def _effect_power(self, n_tot: np.ndarray, on: int, off: int) -> float:
+        """Peak foreground power of an effect over frames ``on..off``. Where speech runs under it, the speech's own typical foreground power (median of the
+        speech frames within 1.5 s, the effect itself left out) is taken off, so a quiet effect inside a loud passage is not credited with the voice's level."""
+        peak = float(n_tot[on:off + 1].max())
+        lo, hi = max(0, on - 60), min(self.T, off + 61)
+        near = self.speech[lo:hi].copy()
+        near[max(0, on - 4 - lo):off + 5 - lo] = False
+        if near.sum() < 10 or float(self.speech[on:off + 1].mean()) < 0.25:
+            return peak
+        return max(peak - float(np.median(n_tot[lo:hi][near])), 0.01 * peak)
 
     @staticmethod
     def _context(ser: np.ndarray, pk: int, bursts: list[tuple[int, int, int]]) -> np.ndarray:

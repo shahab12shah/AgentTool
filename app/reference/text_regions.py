@@ -119,7 +119,7 @@ def _dilate(mask: np.ndarray, ry: int, rx: int) -> np.ndarray:
 
 def _fill_mask(sub: np.ndarray, k: int, t: float = 0.22) -> np.ndarray:
     """Bright pixels enclosed on both sides (horizontally or vertically, within ``k`` px) by clearly darker pixels: the inside of an outlined / dark-backed stroke."""
-    y = sub @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    y = sub.max(axis=2)  # the brightest channel, not luma: saturated red or blue text is dark in luma but as bright as white text against its outline
     big = np.float32(2.0)
 
     def darker_both(axis: int) -> np.ndarray:
@@ -342,9 +342,9 @@ class TextRegionDetector:
             band_h = rb - ra
             cols = _runs(cp >= 1)
             # the vertical sides of a background box (a thin column of edges as tall as the band, clearly apart from the text) are not text
-            while len(cols) > 1 and cols[0][1] - cols[0][0] <= 3 and cp[cols[0][0]:cols[0][1]].max() >= 0.9 * band_h and cols[1][0] - cols[0][1] >= max(3, 0.4 * band_h):
+            while len(cols) > 1 and cols[0][1] - cols[0][0] <= 3 and cp[cols[0][0]:cols[0][1]].max() >= 0.9 * band_h and cols[1][0] - cols[0][1] >= max(3, 0.25 * band_h):
                 cols = cols[1:]
-            while len(cols) > 1 and cols[-1][1] - cols[-1][0] <= 3 and cp[cols[-1][0]:cols[-1][1]].max() >= 0.9 * band_h and cols[-1][0] - cols[-2][1] >= max(3, 0.4 * band_h):
+            while len(cols) > 1 and cols[-1][1] - cols[-1][0] <= 3 and cp[cols[-1][0]:cols[-1][1]].max() >= 0.9 * band_h and cols[-1][0] - cols[-2][1] >= max(3, 0.25 * band_h):
                 cols = cols[:-1]
             for ca, cb in _close_runs(cols, max(3, int(round(0.9 * band_h)))):
                 ln = self._score(e, ex, ey, gm, rgb, luma, x0 + ca, y0 + ra, x0 + cb, y0 + rb)
@@ -487,7 +487,7 @@ class TextRegionDetector:
             per_side = np.stack([np.clip(sign * s, 0, None) for s in steps])
             side_best = per_side.max(axis=1)
             best = max(best, float(side_best.min()))
-        return float(min(1.0, best / 0.10))
+        return float(min(1.0, max(0.0, (best - 0.04) / 0.08)))  # a soft shading of the picture reaches ~0.05 on every side; a real plate over a mid-tone picture 0.15+
 
     # ------------------------------------------------------------------ colour emphasis
     def _emphasis(self, rgb: np.ndarray, x0: int, y0: int, x1: int, y1: int) -> tuple[float, bool]:
@@ -519,14 +519,21 @@ class TextRegionDetector:
             return 0.0, False
         px = sub[core]
         u = px / np.maximum(px.max(axis=1, keepdims=True), 1e-3)
-        main = np.median(u, axis=0)
+        q = np.minimum((u * 4).astype(np.int32), 3)
+        key = q[:, 0] * 16 + q[:, 1] * 4 + q[:, 2]
+        main = u[key == int(np.argmax(np.bincount(key, minlength=64)))].mean(axis=0)  # the dominant colour (a median fails when the highlight is about half the line)
         minority = np.sqrt(((u - main) ** 2).sum(axis=1)) > 0.38
+        if float(minority.mean()) > 0.5:  # the dominant bin holds fewer pixels than the rest (heavier letters in the other colour): the smaller colour is the highlight
+            minority = ~minority
         share = float(minority.mean())
-        if share < 0.05 or share > 0.62:
+        if share < 0.05 or share > 0.5 or not minority.any() or minority.all():
+            return 0.0, True
+        # a highlight is a vivid colour against the other one (or the other one is vivid and the highlight is not): pale tints are the picture showing through the letters
+        if max(1.0 - float(u[~minority].mean(axis=0).min()), 1.0 - float(u[minority].mean(axis=0).min())) < 0.55:
             return 0.0, True
         mm = np.zeros(core.shape, dtype=bool)
         mm[core] = minority
         col_core = core.sum(axis=0)
         col_flag = (col_core > 0) & (mm.sum(axis=0) >= 0.6 * np.maximum(col_core, 1))
         best = max((b - a for a, b in _close_runs(_runs(col_flag), 2)), default=0)
-        return (share if best >= max(4, int(0.03 * w)) else 0.0), True
+        return (share if best >= max(4, int(0.09 * w)) else 0.0), True  # a highlighted word is at least ~9 % of its line

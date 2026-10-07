@@ -17,6 +17,7 @@ from app.qc.severity import Severity
 from app.qc.tests.qc_helpers import add_asset, add_clip, add_scene, find, narrate, new_project, qc_ctx, run_checker
 from app.qc.timeline_checker import INFO, TimelineChecker
 from app.timeline.keyframes import Keyframe
+from app.tests.conftest import needs_ffmpeg
 from app.timeline.track import Track, TrackKind
 
 
@@ -547,3 +548,17 @@ def test_findings_are_deterministic_and_fingerprints_survive_a_rerun(tmp_path):
     a, b = check(p), check(p)
     assert [i.fingerprint for i in a.issues] == [i.fingerprint for i in b.issues] and all(i.fingerprint for i in a.issues)
     assert [i.issue_id for i in a.issues] != [i.issue_id for i in b.issues]  # ids are per run, fingerprints are per finding
+
+
+# ------------------------------------------------------------------ real pipeline (needs ffmpeg for the media behind the project)
+@needs_ffmpeg
+def test_real_ai_edited_project_is_clean_and_a_removed_clip_becomes_a_gap(pres_ws):
+    p = pres_ws.project
+    out = check(p)
+    assert out.issues == [] and out.complete and out.metrics["visual_covered_ratio"] == 1.0  # TimelineValidator / PresentationValidator and the new checks agree with the assembler
+    mid = p.scenes[len(p.scenes) // 2]
+    victim = next(c for t, c in [(t, c) for t in p.timeline.tracks for c in t.clips] if t.id in ("track_v1", "track_v2", "track_v3") and c.timeline_start >= mid.start - 1e-6 and c.timeline_end <= mid.end + 1e-6)
+    next(t for t in p.timeline.tracks if t.id == victim.track_id).clips.remove(victim)  # direct edit of the live project: the test never saves it
+    out = check(p)
+    gap = [i for i in out.issues if i.code == "timeline.gap.unintended"]
+    assert gap and gap[0].scene_id == mid.id and out.metrics["visual_covered_ratio"] < 1.0
