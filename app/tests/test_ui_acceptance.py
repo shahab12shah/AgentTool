@@ -88,7 +88,7 @@ def test_full_acceptance_workflow(win, tmp_path, media_dir, app_paths, qapp):
     ws = win.ws
     # Launch: home screen, other pages disabled until a project exists.
     assert win.project_view.currentIndex() == 0
-    assert not win.nav.item(6).flags() & Qt.ItemFlag.ItemIsEnabled
+    assert not win.nav.item(win.page_index["Timeline"]).flags() & Qt.ItemFlag.ItemIsEnabled
 
     # Create project (defaults 1920x1080 / 30 / 16:9).
     project = create_project(win, tmp_path)
@@ -96,14 +96,14 @@ def test_full_acceptance_workflow(win, tmp_path, media_dir, app_paths, qapp):
     assert (project.settings.width, project.settings.height, project.settings.fps) == (1920, 1080, 30)
     assert (root / "project.json").is_file() and (root / "media" / "audio").is_dir()
     assert win.project_view.currentIndex() == 1 and "Acceptance" in win.name_label.text()
-    assert win.nav.item(6).flags() & Qt.ItemFlag.ItemIsEnabled
+    assert win.nav.item(win.page_index["Timeline"]).flags() & Qt.ItemFlag.ItemIsEnabled
 
     # Import video, image, voice-over; they appear in the library with thumbnails.
     import_all(win, media_dir)
     names = sorted(win.library.list.item(i).text().split("\n")[0] for i in range(win.library.list.count()))
     assert names == ["clip.mp4", "pic.png", "voice.wav"]
     assert win.library.list.count() == 3
-    assert win.voice_panel.filename.text() == "voice.wav" and win.voice_panel.duration.text().startswith("00:00:04")
+    assert win.voice_panel.filename.text() == "voice.wav" and win.voice_panel.duration.text() == "0:04"
     for a in project.assets:
         assert ws.media.thumbnail_file(a) is not None, a.name
 
@@ -112,7 +112,7 @@ def test_full_acceptance_workflow(win, tmp_path, media_dir, app_paths, qapp):
     win.script_panel.flush()
     assert project.script.text == "This is my script.\nSecond line."
     assert "6 words" in win.script_panel.counts.text()
-    assert win.script_panel.analyze.isEnabled() is False  # not faked
+    assert win.script_panel.analyze.isEnabled() and "Scenes" in win.script_panel.analyze.text()  # real action, not a stub
 
     # Preview image and video.
     video = next(a for a in project.assets if a.type.value == "video")

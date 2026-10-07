@@ -61,18 +61,25 @@ class PocketSphinxProvider(TranscriptionProvider):
         if not data:
             raise TranscriptionError("The audio file contains no audio.")
 
-        decoder = Decoder(samprate=16000, loglevel="FATAL")
-        decoder.start_utt()
-        for pos in range(0, len(data), CHUNK_BYTES):
-            if should_cancel and should_cancel():
-                raise JobCancelled()
-            decoder.process_raw(data[pos : pos + CHUNK_BYTES], no_search=False, full_utt=False)
-            if progress:
-                progress(0.05 + 0.9 * min(1.0, (pos + CHUNK_BYTES) / len(data)), "Recognising speech")
-        decoder.end_utt()
+        try:
+            decoder = Decoder(samprate=16000, loglevel="FATAL")
+            decoder.start_utt()
+            for pos in range(0, len(data), CHUNK_BYTES):
+                if should_cancel and should_cancel():
+                    decoder.end_utt()
+                    raise JobCancelled()
+                decoder.process_raw(data[pos : pos + CHUNK_BYTES], no_search=False, full_utt=False)
+                if progress:
+                    progress(0.05 + 0.9 * min(1.0, (pos + CHUNK_BYTES) / len(data)), "Recognising speech")
+            decoder.end_utt()
+            segments = list(decoder.seg() or [])  # seg() is None when nothing was recognised
+        except JobCancelled:
+            raise
+        except Exception as exc:
+            raise TranscriptionError("The offline speech engine failed on this audio.", details=f"{type(exc).__name__}: {exc}") from exc
 
         words: list[RawWord] = []
-        for seg in decoder.seg():
+        for seg in segments:
             text = re.sub(r"\(\d+\)$", "", seg.word)
             if text in _SKIP or text.startswith("[") or text.startswith("++") or text.startswith("<"):
                 continue

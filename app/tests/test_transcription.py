@@ -229,6 +229,21 @@ def test_api_provider_never_logs_the_key(api_server, tmp_path, monkeypatch):
 
 
 @needs_ffmpeg
+def test_pocketsphinx_silence_means_no_speech_not_a_crash(tmp_path):
+    pytest.importorskip("pocketsphinx")
+    import subprocess
+
+    wav = tmp_path / "silence.wav"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "2", str(wav)], check=True)
+    from app.transcription.providers.pocketsphinx_provider import PocketSphinxProvider
+
+    out = PocketSphinxProvider().transcribe(wav, "en")
+    assert out.words == []
+    with pytest.raises(TranscriptionError, match="No speech"):
+        TranscriptionEngine().run(PocketSphinxProvider(), wav, AUDIO)
+
+
+@needs_ffmpeg
 def test_pocketsphinx_provider_runs_and_returns_well_formed_timings(tmp_path):
     """Real offline engine on real audio. Asserts structure/timing validity only — NOT recognition accuracy."""
     pytest.importorskip("pocketsphinx")
@@ -240,7 +255,7 @@ def test_pocketsphinx_provider_runs_and_returns_well_formed_timings(tmp_path):
 
     p = PocketSphinxProvider()
     assert p.is_available()[0] and p.accuracy_note
-    out = p.transcribe(wav, "en")  # noise may legitimately produce zero or a few words
+    out = p.transcribe(wav, "en")  # noise may legitimately produce zero or a few words (never an exception)
     words, _, _ = normalize_words(out.words)
     assert all(0 <= w.start <= w.end <= 3.2 for w in words)
     with pytest.raises(TranscriptionError, match="English"):

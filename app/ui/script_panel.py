@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QTimer
+from PySide6.QtCore import QEvent, QTimer, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
@@ -22,6 +22,8 @@ class _ScriptEdit(QPlainTextEdit):
 
 
 class ScriptPanel(QWidget):
+    analyze_requested = Signal()
+
     def __init__(self, ctx: UiContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.ctx = ctx
@@ -34,9 +36,9 @@ class ScriptPanel(QWidget):
         self.editor.setFont(font)
         self.counts = QLabel("0 words • 0 characters")
         self.counts.setObjectName("muted")
-        self.analyze = QPushButton("Analyze Script — Coming in Phase 2")
-        self.analyze.setEnabled(False)
-        self.analyze.setToolTip("AI script analysis is planned for Phase 2.")
+        self.analyze = QPushButton("Analyze Scenes →")
+        self.analyze.setToolTip("Scene analysis uses the voice-over transcript (the voice is the master timing reference); the script is compared with it.")
+        self.analyze.clicked.connect(self.analyze_requested)
 
         title = QLabel("Script")
         title.setObjectName("title")
@@ -77,6 +79,7 @@ class ScriptPanel(QWidget):
         project = self.ctx.ws.project
         text = project.script.text if project else ""
         self.editor.setEnabled(project is not None)
+        self.analyze.setEnabled(project is not None)
         if self.editor.toPlainText() != text:
             self._timer.stop()
             self._loading = True

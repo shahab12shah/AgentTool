@@ -136,3 +136,19 @@ def test_secondary_types_and_confidence_are_reported():
 
     top, secondary, conf = pick_type(analyse("The IRS sent a notice to affected taxpayers in the United States.").type_scores)
     assert top is V.EVIDENCE and 0.0 <= conf <= 1.0 and all(isinstance(t, V) for t in secondary)
+
+
+# ------------------------------------------------------------------ regressions found by looking at the real UI
+def test_sentence_initial_words_inside_a_scene_are_not_entities():
+    """A scene covers several sentences; 'The'/'Inflation' after a full stop are not proper nouns."""
+    ents = extract_entities(toks("Next, consider inflation. Inflation hit 3.5% according to the Federal Reserve. The Supreme Court ruled on tax law."))
+    names = {e.text for e in ents}
+    assert {"Federal Reserve", "Supreme Court"} <= names
+    assert "The" not in names and "Inflation" not in names
+
+
+def test_instructions_and_fragments_are_not_claims():
+    assert analyse("Next, consider inflation.").claims == []
+    assert analyse("Moving on to housing.").claims == []
+    assert analyse("Remember that nobody can predict the future.").claims == []
+    assert analyse("Inflation hit 3.5% according to the Federal Reserve.").claims  # a real claim still is one

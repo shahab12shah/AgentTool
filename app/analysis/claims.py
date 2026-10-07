@@ -8,6 +8,7 @@ from app.analysis.prep import AToken
 from app.core.textutil import stem
 
 _NO_EVIDENCE = {ClaimType.OPINION, ClaimType.QUESTION}
+IMPERATIVE_STARTS = {"consider", "remember", "imagine", "look", "think", "let", "listen", "watch", "subscribe", "click", "stay", "keep", "make"}
 _SKIP_FILLER = {"welcome", "subscribe", "thanks", "thank", "hello", "hi", "hey", "like", "comment", "bell"}
 
 
@@ -23,6 +24,9 @@ def classify_claim(tokens: list[AToken], numbers: list[NumericMention], text: st
         return None
     domain = "market" if _count(stems, "domain_market") >= 2 else "legal" if _count(stems, "domain_legal") >= 2 else None
     first = norms[0]
+    lead = [n for n in norms[:3] if n not in ("next", "now", "so", "and", "but", "okay", "first", "finally")]
+    if lead and lead[0] in IMPERATIVE_STARTS and not text.rstrip().endswith("?"):
+        return None  # an instruction or discourse move, not a checkable assertion
     if text.rstrip().endswith("?") or (first in QUESTION_STARTS and first in ("what", "why", "how", "who", "when", "where", "which")):
         return ClaimType.QUESTION, domain
     if text.rstrip().endswith("?") is False and first in QUESTION_STARTS and len(norms) > 3 and norms[1] in ("you", "we", "they", "it", "this") \
@@ -46,6 +50,8 @@ def classify_claim(tokens: list[AToken], numbers: list[NumericMention], text: st
         return ClaimType.DATE, domain
     if kinds & {NumberKind.PRICE, NumberKind.PERCENTAGE, NumberKind.DOLLAR_AMOUNT, NumberKind.QUANTITY, NumberKind.AGE}:
         return ClaimType.NUMBER, domain
+    if len(norms) < 5:
+        return None  # too short to be a meaningful assertion ("Moving on to housing.")
     return ClaimType.FACT, domain
 
 

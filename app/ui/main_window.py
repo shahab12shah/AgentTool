@@ -37,13 +37,14 @@ from app.ui.project_view import ProjectView
 from app.ui.script_panel import ScriptPanel
 from app.ui.theme import stylesheet
 from app.ui.timeline_panel import TimelinePanel
+from app.ui.scene_panel import ScenePanel
+from app.ui.visuals_panel import VisualsPanel
 from app.ui.voice_panel import VoicePanel
 
-NAV = ("Project", "Script", "Voice", "Visuals", "Review", "Edit", "Timeline", "Export")
-PLACEHOLDERS = {
-    "Visuals": "AI visual research: find candidate footage, stock, web images and screenshots for every scene.",
-    "Review": "Review and replace the visuals the AI selected, scene by scene.",
-    "Edit": "AI editing: captions, motion graphics, transitions and audio mixing as editable timeline decisions.",
+NAV = ("Project", "Script", "Voice", "Scenes", "Visuals", "Review", "Edit", "Timeline", "Export")
+PLACEHOLDERS = {  # name -> (badge, description)
+    "Review": ("Coming in Phase 3", "Review and replace the visuals the AI selected, scene by scene."),
+    "Edit": ("Coming in a later phase", "AI editing: captions, motion graphics, transitions and audio mixing as editable timeline decisions."),
 }
 
 
@@ -55,14 +56,14 @@ def _slot() -> QWidget:
 
 
 class PlaceholderPage(QWidget):
-    def __init__(self, name: str, description: str) -> None:
+    def __init__(self, name: str, badge: str, description: str) -> None:
         super().__init__()
         lay = QVBoxLayout(self)
         lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title = QLabel(name)
         title.setObjectName("title")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        soon = QLabel("Coming in Phase 2")
+        soon = QLabel(badge)
         soon.setObjectName("placeholder")
         soon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         desc = QLabel(description)
@@ -90,6 +91,8 @@ class MainWindow(QMainWindow):
         self.timeline_panel.selected_provider = self.library.selected_ids
         self.script_panel = ScriptPanel(ctx)
         self.voice_panel = VoicePanel(ctx)
+        self.scene_panel = ScenePanel(ctx, self.voice_panel.player)  # the voice-over player is shared
+        self.visuals_panel = VisualsPanel(ctx)
         self.export_panel = ExportPanel(ctx)
         self.project_view = ProjectView(ctx)
         self.jobs_panel = JobsPanel(ctx)
@@ -194,11 +197,13 @@ class MainWindow(QMainWindow):
             "Project": self.project_view,
             "Script": self.script_panel,
             "Voice": self.voice_panel,
+            "Scenes": self.scene_panel,
+            "Visuals": self.visuals_panel,
             "Timeline": timeline_page,
             "Export": self.export_panel,
         }
         for name in NAV:
-            w = widgets.get(name) or PlaceholderPage(name, PLACEHOLDERS[name])
+            w = widgets.get(name) or PlaceholderPage(name, *PLACEHOLDERS[name])
             self.page_index[name] = self.pages.addWidget(w)
 
         self.nav = QListWidget()
@@ -230,6 +235,7 @@ class MainWindow(QMainWindow):
         self.library.asset_activated.connect(self.preview_asset)
         self.library.add_to_timeline_requested.connect(self._add_to_timeline)
         self.timeline_panel.preview_requested.connect(self.preview_asset)
+        self.script_panel.analyze_requested.connect(lambda: self.go_to("Scenes"))
         self.project_view.open_requested.connect(self.open_project)
         self.project_view.close_requested.connect(self.close_project)
         for topic in ("project.opened", "project.closed", "project.dirty_changed", "project.saved"):
@@ -282,6 +288,7 @@ class MainWindow(QMainWindow):
         self.script_panel.flush()
         self.preview.pause()
         self.voice_panel.pause()
+        self.scene_panel.pause()
         self.pages.setCurrentIndex(row)
         self._place_shared(name)
         if name == "Export":
@@ -384,7 +391,7 @@ class MainWindow(QMainWindow):
         self.ctx.guard(self, self.ws.redo)
 
     def open_settings(self) -> None:
-        dlg = SettingsDialog(self.ws.settings, self.ws.describe_ffmpeg, self)
+        dlg = SettingsDialog(self.ws.settings, self.ws.describe_ffmpeg, self.ws.transcripts.provider_report, self)
         if dlg.exec():
             self.ctx.guard(self, lambda: self.ws.update_settings(dlg.result_settings()), modal=True, title="Settings")
             self._apply_settings()

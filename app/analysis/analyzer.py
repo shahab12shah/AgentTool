@@ -324,12 +324,14 @@ class RuleBasedAnalyzer(SemanticAnalyzer):
             score = idf.get(stem(a), 1.0) + idf.get(stem(b), 1.0) + (1.0 if a in names or b in names else 0.0)
             if score > best_score:
                 best, best_score = (a, b), score
+        proper = {EntityType.PERSON, EntityType.COMPANY, EntityType.ORGANIZATION, EntityType.GOVERNMENT_AGENCY}
         subject = max((e for e in entities if e.type not in (EntityType.COUNTRY, EntityType.CITY)),
-                      key=lambda e: (e.mentions, len(e.text)), default=None)
+                      key=lambda e: (e.type in proper, e.mentions, len(e.text)), default=None)
         if best is None and subject is not None:
             terms = [t for t in self._top_terms(norms, idf) if self._nounish(t) and t not in subject.canonical.split()]
             if terms:
-                return f"{subject.text} {terms[0]}"
+                display = {w.lower(): w for e in entities for w in e.text.split()}
+                return f"{subject.text} {display.get(terms[0], terms[0])}"
         if best:
             return _phrase(list(best), entities)
         if subject:

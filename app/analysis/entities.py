@@ -5,10 +5,16 @@ from __future__ import annotations
 from app.analysis.lexicon import FIRST_NAMES, GAZETTEER, HONORIFICS, MAX_PHRASE, ORG_SUFFIXES, STRICT_CASE
 from app.analysis.models import Entity, EntityType
 from app.analysis.prep import AToken
+from app.core.textutil import STOPWORDS
 
 
 def _is_cap(tok: AToken) -> bool:
     return tok.text[:1].isupper()
+
+
+def _sentence_initial(tokens: list[AToken], i: int) -> bool:
+    """True for the first token of the text and for tokens that follow sentence-final punctuation (script surfaces keep it)."""
+    return i == 0 or tokens[i - 1].text.rstrip("\"')").endswith((".", "?", "!"))
 
 
 def extract_entities(tokens: list[AToken]) -> list[Entity]:
@@ -55,10 +61,11 @@ def extract_entities(tokens: list[AToken]) -> list[Entity]:
         while j < len(tokens) and not covered[j] and _is_cap(tokens[j]) and not tokens[j].spoken_number:
             j += 1
         run = tokens[i:j]
-        if i == 0 and len(run) == 1 and t.norm not in FIRST_NAMES:
+        initial = _sentence_initial(tokens, i)
+        if initial and len(run) == 1 and t.norm not in FIRST_NAMES:
             i = j  # a lone capitalised first word is just the start of the sentence
             continue
-        if i == 0 and len(run) > 1 and run[0].norm in _SENTENCE_STARTERS:
+        if initial and len(run) > 1 and (run[0].norm in _SENTENCE_STARTERS or run[0].norm not in FIRST_NAMES and run[0].norm in STOPWORDS):
             run = run[1:]
         if run:
             text = " ".join(r.text.strip(".,;:!?\"'") for r in run)

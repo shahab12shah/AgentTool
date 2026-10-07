@@ -59,12 +59,16 @@ QLabel#muted {{ color: {c['muted']}; }}
 QLabel#placeholder {{ color: {c['muted']}; font-size: 16px; }}
 QLabel#logo {{ font-weight: 700; font-size: 15px; color: {c['accent']}; padding-right: 8px; }}
 QLabel#projectname {{ font-weight: 600; font-size: 14px; padding: 0 12px; }}
+QFrame#failureBox {{ background: {c['panel2']}; border: 1px solid {c['danger']}; border-radius: 6px; padding: 6px; }}
 QStatusBar, QFrame#jobbar {{ background: {c['panel']}; border-top: 1px solid {c['border']}; }}
 QProgressBar {{ background: {c['panel2']}; border: 1px solid {c['border']}; border-radius: 4px; text-align: center; height: 14px; }}
 QProgressBar::chunk {{ background: {c['accent']}; border-radius: 3px; }}
 QSlider::groove:horizontal {{ height: 4px; background: {c['panel2']}; border-radius: 2px; }}
 QSlider::sub-page:horizontal {{ background: {c['accent']}; border-radius: 2px; }}
 QSlider::handle:horizontal {{ width: 12px; margin: -5px 0; border-radius: 6px; background: {c['text']}; }}
+QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {c['muted']}; border-radius: 3px; background: {c['panel']}; }}
+QCheckBox::indicator:checked {{ background: {c['accent']}; border-color: {c['accent']}; }}
+QCheckBox::indicator:hover {{ border-color: {c['accent']}; }}
 QScrollArea {{ border: none; }}
 QScrollBar:horizontal {{ background: {c['panel']}; height: 12px; }}
 QScrollBar:vertical {{ background: {c['panel']}; width: 12px; }}
