@@ -55,6 +55,9 @@ from app.presentation.models import (
     VoiceProcessingSettings,
 )
 from app.presentation import exports
+from app.editing.overrides import EditingStrategyOverrides
+from app.reference.application import ReferenceAsset, ReferenceSettings, StyleApplication
+from app.reference.style_model import ReferenceStyleProfile
 from app.storage.paths import ProjectPaths
 from app.transcription.alignment import ScriptAlignment
 from app.transcription.models import TranscriptionState
@@ -119,6 +122,13 @@ class Project:
     # Phase 6: rendering (the project never contains rendered media: only what was rendered, with which settings, from which timeline)
     render_history: list[dict[str, Any]] = field(default_factory=list)
     proxies: dict[str, dict[str, Any]] = field(default_factory=dict)  # asset_id -> ProxyRecord (see rendering/proxy.py)
+    # Phase 7: reference style analysis. Reference videos are analysis input only: they never enter ``assets`` or the timeline.
+    reference_settings: ReferenceSettings = field(default_factory=ReferenceSettings)
+    reference_assets: dict[str, ReferenceAsset] = field(default_factory=dict)
+    reference_analysis: dict[str, dict[str, Any]] = field(default_factory=dict)  # reference id -> compact analysis record (the full cache is references/<id>/analysis.json)
+    reference_style_profile: ReferenceStyleProfile | None = None  # the profile of the active reference
+    reference_style_overrides: EditingStrategyOverrides = field(default_factory=EditingStrategyOverrides)  # what is applied right now (abstract parameters only)
+    style_application_history: list[StyleApplication] = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION
     application_version: str = APP_VERSION
     # Runtime-only state (never serialised):
@@ -288,6 +298,12 @@ class Project:
             "presentation_sessions": to_plain(self.presentation_sessions[-50:]),
             "render_history": copy.deepcopy(self.render_history[-200:]),
             "proxies": copy.deepcopy(self.proxies),
+            "reference_settings": self.reference_settings.to_dict(),
+            "reference_assets": {k: v.to_dict() for k, v in self.reference_assets.items()},
+            "reference_analysis": copy.deepcopy(self.reference_analysis),
+            "reference_style_profile": self.reference_style_profile.to_dict() if self.reference_style_profile else {},
+            "reference_style_overrides": self.reference_style_overrides.to_dict(),
+            "style_application_history": [h.to_dict() for h in self.style_application_history[-50:]],
             "counters": {"asset": self.assets.counter},
         }
 
@@ -340,6 +356,12 @@ class Project:
                 presentation_sessions=[from_plain(PresentationSession, v) for v in doc["presentation_sessions"]],
                 render_history=list(doc.get("render_history", [])),
                 proxies=dict(doc.get("proxies", {})),
+                reference_settings=ReferenceSettings.from_dict(doc["reference_settings"]) if doc["reference_settings"] else ReferenceSettings(),
+                reference_assets={k: ReferenceAsset.from_dict(v) for k, v in doc["reference_assets"].items()},
+                reference_analysis=copy.deepcopy(doc["reference_analysis"]),
+                reference_style_profile=ReferenceStyleProfile.from_dict(doc["reference_style_profile"]) if doc["reference_style_profile"] else None,
+                reference_style_overrides=EditingStrategyOverrides.from_dict(doc["reference_style_overrides"]) if doc["reference_style_overrides"] else EditingStrategyOverrides(),
+                style_application_history=[StyleApplication.from_dict(v) for v in doc["style_application_history"]],
                 assets=AssetRegistry(
                     [Asset.from_dict(a) for a in doc["assets"]], counter=int((doc.get("counters") or {}).get("asset", 0))
                 ),

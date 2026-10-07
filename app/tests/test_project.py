@@ -25,7 +25,7 @@ def test_create_builds_folder_structure_and_valid_json(pm, tmp_path):
         assert (root / sub).is_dir()
     doc = json.loads((root / "project.json").read_text())
     validate_document(doc)
-    assert doc["schema_version"] == 6
+    assert doc["schema_version"] == 7
     assert doc["project"]["name"] == "My Finance Video"
     assert doc["settings"] == {"width": 1920, "height": 1080, "fps": 30, "aspect_ratio": "16:9"}
     assert len(doc["timeline"]["tracks"]) == 9

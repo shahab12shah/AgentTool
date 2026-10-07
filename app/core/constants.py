@@ -4,7 +4,7 @@ from __future__ import annotations
 
 APP_NAME = "AgentTool"
 APP_VERSION = "0.1.0"
-SCHEMA_VERSION = 6  # 6 = Phase 6 (render settings, render history, proxies); 5 = Phase 5 (audio, captions, graphics); 4 = Phase 4 (AI editing: decisions, strategy, generation state); 2 = Phase 2 (transcription, scenes, intents); 3 = Phase 3 (visual research, candidates, assignments)
+SCHEMA_VERSION = 7  # 7 = Phase 7 (reference style analysis: reference assets, style profile, overrides, application history); 6 = Phase 6 (render settings, render history, proxies); 5 = Phase 5 (audio, captions, graphics); 4 = Phase 4 (AI editing: decisions, strategy, generation state); 2 = Phase 2 (transcription, scenes, intents); 3 = Phase 3 (visual research, candidates, assignments)
 
 PROJECT_FILE = "project.json"
 PROJECT_BACKUP_SUFFIX = ".bak"
@@ -23,6 +23,7 @@ PROJECT_SUBDIRS: tuple[str, ...] = (
     "previews",
     "renders",
     "cache",
+    "references",
 )
 
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".avi"})

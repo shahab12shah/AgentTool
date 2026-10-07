@@ -29,6 +29,7 @@ from app.ui.dialogs.message import ask_save_changes, show_error
 from app.ui.dialogs.recovery_dialog import RecoveryDialog
 from app.ui.dialogs.settings_dialog import SettingsDialog
 from app.ui.export_panel import ExportPanel
+from app.ui.reference_panel import ReferencePanel
 from app.ui.inspector_panel import InspectorPanel
 from app.ui.jobs_panel import JobsPanel, JobStatusBar
 from app.ui.media_library import MediaLibrary
@@ -44,7 +45,7 @@ from app.ui.scene_panel import ScenePanel
 from app.ui.visuals_panel import VisualsPanel
 from app.ui.voice_panel import VoicePanel
 
-NAV = ("Project", "Script", "Voice", "Scenes", "Visuals", "Review", "AI Edit", "Audio & Captions", "Edit", "Timeline", "Export")
+NAV = ("Project", "Script", "Voice", "Scenes", "Visuals", "Review", "Reference", "AI Edit", "Audio & Captions", "Edit", "Timeline", "Export")
 PLACEHOLDERS = {  # name -> (badge, description)
     "Edit": ("Coming in a later phase", "Caption rendering, audio mixing, music/SFX libraries and final export are planned for later phases."),
 }
@@ -100,6 +101,7 @@ class MainWindow(QMainWindow):
         self.ai_edit_panel.go_to_research = self._research_scene
         self.presentation_panel = PresentationPanel(ctx, self.voice_panel.player)
         self.export_panel = ExportPanel(ctx)
+        self.reference_panel = ReferencePanel(ctx)
         self.project_view = ProjectView(ctx)
         self.jobs_panel = JobsPanel(ctx)
         self.job_bar = JobStatusBar(ctx, self.jobs_panel)
@@ -206,6 +208,7 @@ class MainWindow(QMainWindow):
             "Scenes": self.scene_panel,
             "Visuals": self.visuals_panel,
             "Review": self.review_panel,
+            "Reference": self.reference_panel,
             "AI Edit": self.ai_edit_panel,
             "Audio & Captions": self.presentation_panel,
             "Timeline": timeline_page,
@@ -247,6 +250,7 @@ class MainWindow(QMainWindow):
         self.script_panel.analyze_requested.connect(lambda: self.go_to("Scenes"))
         self.project_view.open_requested.connect(self.open_project)
         self.export_panel.return_to_editor.connect(lambda: self.go_to("Timeline"))
+        self.reference_panel.go_to_ai_edit.connect(lambda: self.go_to("AI Edit"))
         self.project_view.close_requested.connect(self.close_project)
         for topic in ("project.opened", "project.closed", "project.dirty_changed", "project.saved"):
             b.on(topic, lambda p: self._sync_state())
@@ -309,10 +313,13 @@ class MainWindow(QMainWindow):
         self.scene_panel.pause()
         self.ai_edit_panel.pause()
         self.presentation_panel.pause()
+        self.reference_panel.pause()
         self.pages.setCurrentIndex(row)
         self._place_shared(name)
         if name == "Review":
             self.review_panel.refresh()
+        if name == "Reference":
+            self.reference_panel.refresh()
         if name == "AI Edit":
             self.ai_edit_panel.refresh()
         if name == "Audio & Captions":

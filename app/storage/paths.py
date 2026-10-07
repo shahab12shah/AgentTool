@@ -75,6 +75,14 @@ class ProjectPaths:
     def thumbnails_dir(self) -> Path:
         return self.root / "thumbnails"
 
+    @property
+    def references_dir(self) -> Path:
+        """Reference videos and their analysis (``references/<id>/{reference_video.ext, analysis.json, thumbnails/}``): isolated from ``media/``."""
+        return self.root / "references"
+
+    def reference_dir(self, reference_id: str) -> Path:
+        return self.references_dir / reference_id
+
     def media_subdir(self, asset_type: str) -> Path:
         return self.media_dir / {"video": "video", "image": "images", "audio": "audio"}.get(asset_type, "video")
 

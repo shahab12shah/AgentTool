@@ -702,7 +702,7 @@ def test_older_projects_migrate_to_schema_5(pres_ws):
         del doc[k]
     doc["schema_version"] = 4
     p = Project.from_document(doc)
-    assert p.schema_version == 6 and p.caption_settings.style_id == "professional" and p.presentation_decisions == {} and p.audio_settings.music_level == 0.18
+    assert p.schema_version == 7 and p.caption_settings.style_id == "professional" and p.presentation_decisions == {} and p.audio_settings.music_level == 0.18
 
 
 def test_autosave_captures_presentation_changes_and_checkpoint_is_written(pres_ws):

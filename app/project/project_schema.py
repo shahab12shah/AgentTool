@@ -208,6 +208,15 @@ def migrate_document(doc: dict[str, Any]) -> dict[str, Any]:
         doc.setdefault("render_history", [])
         doc.setdefault("proxies", {})
         doc["schema_version"] = 6
+        version = 6
+    if version == 6:  # Phase 6 -> Phase 7: reference style analysis (additive; nothing existing changes)
+        doc.setdefault("reference_settings", {})
+        doc.setdefault("reference_assets", {})
+        doc.setdefault("reference_analysis", {})
+        doc.setdefault("reference_style_profile", {})
+        doc.setdefault("reference_style_overrides", {})
+        doc.setdefault("style_application_history", [])
+        doc["schema_version"] = 7
     return doc
 
 
@@ -271,6 +280,14 @@ _V6_SECTIONS: dict[str, type] = {
     "render_history": list,
     "proxies": dict,
 }
+_V7_SECTIONS: dict[str, type] = {
+    "reference_settings": dict,
+    "reference_assets": dict,
+    "reference_analysis": dict,
+    "reference_style_profile": dict,
+    "reference_style_overrides": dict,
+    "style_application_history": list,
+}
 
 
 def validate_document(doc: Any) -> None:
@@ -288,7 +305,7 @@ def validate_document(doc: Any) -> None:
         )
     elif version < 1:
         problems.append(f"unsupported schema_version {version}")
-    for key, typ in {**_REQUIRED_SECTIONS, **(_V2_SECTIONS if isinstance(version, int) and version >= 2 else {}), **(_V3_SECTIONS if isinstance(version, int) and version >= 3 else {}), **(_V4_SECTIONS if isinstance(version, int) and version >= 4 else {}), **(_V5_SECTIONS if isinstance(version, int) and version >= 5 else {}), **(_V6_SECTIONS if isinstance(version, int) and version >= 6 else {})}.items():
+    for key, typ in {**_REQUIRED_SECTIONS, **(_V2_SECTIONS if isinstance(version, int) and version >= 2 else {}), **(_V3_SECTIONS if isinstance(version, int) and version >= 3 else {}), **(_V4_SECTIONS if isinstance(version, int) and version >= 4 else {}), **(_V5_SECTIONS if isinstance(version, int) and version >= 5 else {}), **(_V6_SECTIONS if isinstance(version, int) and version >= 6 else {}), **(_V7_SECTIONS if isinstance(version, int) and version >= 7 else {})}.items():
         if key not in doc:
             problems.append(f"missing section '{key}'")
         elif not isinstance(doc[key], typ):

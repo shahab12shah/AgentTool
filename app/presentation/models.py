@@ -127,6 +127,7 @@ class CaptionSettings:
     generated_transcript_id: str = ""
     generated_audio_hash: str = ""
     stale_acknowledged_hash: str = ""  # the user chose "Keep existing" for this voice-over hash
+    user_set: list[str] = field(default_factory=list)  # fields the user changed on purpose (a reference style does not override them)
 
 
 @dataclass
@@ -171,6 +172,7 @@ class AudioSettings:
     sfx_duck_factor: float = 0.8
     max_sfx_per_minute: float = 3.0
     min_sfx_gap: float = 6.0
+    user_set: list[str] = field(default_factory=list)  # fields the user changed on purpose (a reference style does not override them)
     music_fade_in: float = 1.5
     music_fade_out: float = 2.0
     loop_music: bool = True

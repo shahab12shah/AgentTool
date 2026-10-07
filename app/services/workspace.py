@@ -38,6 +38,7 @@ from app.visual.research import VisualResearchService
 from app.services.research_service import ResearchService
 from app.services.editing_service import EditingService
 from app.services.presentation_service import PresentationService
+from app.services.reference_service import ReferenceService
 from app.services.render_service import RenderService
 from app.project.phase2_commands import SetVisualPreferencesCommand
 from app.storage.paths import AppPaths
@@ -79,6 +80,7 @@ class Workspace:
                                                 self.media, self.editing._checkpoint)
         self.render = RenderService(self.projects, self.jobs, self.bus, self.apply_command, self.commands.execute, lambda: self.settings, self.media, self.editing._checkpoint,
                                     lambda project: self.autosave.request(project, force=True))
+        self.reference = ReferenceService(self.projects, self.jobs, self.bus, self.apply_command, self.commands.execute, lambda: self.settings, self.editing._checkpoint)
         self.timeline.edit_hook = self._edit_hook
         self.selected_clip_id: str | None = None
 

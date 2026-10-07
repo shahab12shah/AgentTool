@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any
 
 from app.core.serialization import from_plain, to_plain
+from app.editing.overrides import EditingStrategyOverrides
 
 
 def now_iso() -> str:
@@ -136,6 +137,8 @@ class EditingSettings:
     smart_audio_ducking: bool = True
     caption_mode: str = "ENABLED"  # ENABLED | DISABLED (instructions only; nothing is burned in)
     provider: str = "rule_based"
+    user_set: list[str] = field(default_factory=list)  # fields the user changed on purpose: a reference style never overrides these (unless the user allows it)
+    reference: EditingStrategyOverrides | None = None  # filled in for the engine run only (see editing/effective.py); never saved with the project settings
 
     def to_dict(self) -> dict[str, Any]:
         return to_plain(self)
