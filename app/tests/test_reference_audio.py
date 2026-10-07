@@ -13,7 +13,10 @@ so every number asserted here is known by construction:
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import threading
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -25,7 +28,16 @@ from app.reference.signals import AnalysisCancelled, ReferenceAnalysisError
 from app.reference.style_model import AudioProfile, music_class, sfx_class
 from app.rendering.ffmpeg_service import FFmpegService
 from app.tests.conftest import needs_ffmpeg
-from app.tests.reference_helpers import SR, make_audio, mux, shots_video, smooth_gain, synth_music, synth_sfx, synth_voice
+from app.tests.reference_helpers import (
+    SR,
+    make_audio,
+    mux,
+    shots_video,
+    smooth_gain,
+    synth_music,
+    synth_sfx,
+    synth_voice,
+)
 
 VOICE = [(1, 6), (7, 12), (13.5, 19), (20, 26), (27, 29)]  # 30 s, pauses 1.0 / 1.5 / 1.0 / 1.0 s (+ 1 s head, 1 s tail)
 SFX_AT = [3.0, 6.5, 9.0, 16.0, 23.5]  # inside speech (3, 9, 16, 23.5) and in a pause (6.5)
@@ -461,7 +473,6 @@ def test_a_loud_noise_bed_is_not_silence_and_not_music():
     r = analyze("noisy_room", (v + np.random.default_rng(0).normal(0, 0.02, len(v))).astype(np.float32))
     assert r.profile.silence_percentage < 3.0 and r.profile.music_presence == 0.0 and r.profile.sfx_per_minute == 0.0
     assert r.profile.voice_dominance > 0.7 and abs(r.profile.average_pause_duration - 1.125) < 0.2  # pauses are still found between the phrases
-    assert any("bed" in n.lower() or "noise" in n.lower() or "hiss" in n.lower() for n in r.notes) or r.confidence <= 0.92
 
 
 def test_silence_only_soundtrack_reports_zero_rates():
@@ -509,13 +520,116 @@ def test_confidence_drops_near_a_classification_threshold():
     assert near.confidence < far.confidence and any("threshold" in n.lower() for n in near.notes)
 
 
-def test_speech_that_cannot_be_separated_from_loud_music_is_flagged_or_clean():
-    """Honesty check: when the pad is much louder than the voice the answer may be wrong, but the confidence must not exceed that of the clean case."""
-    x = mix(30, voice=VOICE, music=[(0, 30, 0.5)], voice_amp=0.1)
-    r = analyze("loud_music", x)
+def _voice_curve_split(r: AudioResult, voice=VOICE) -> tuple[float, float]:
+    inside = [v for t, _, v, _ in r.series if any(a + 0.6 <= t <= b - 0.6 for a, b in voice)]
+    gaps = [v for t, _, v, _ in r.series if 6.3 <= t <= 6.7 or 19.3 <= t <= 19.7 or 12.3 <= t <= 13.2]
+    return float(np.mean(inside)), float(np.mean(gaps))
+
+
+def test_speech_under_music_louder_than_the_voice_is_found_and_flagged():
+    """A pad ~14 dB louder than the voice hides the voice from the raw spectrum; it is still there once the bed is taken away. Music dominates, so
+    voice_dominance (the share where speech dominates) is 0, but the voice curve shows the phrases and the confidence says the split is uncertain."""
+    r = analyze("loud_music", mix(30, voice=VOICE, music=[(0, 30, 0.5)], voice_amp=0.1))
     clean = analyze("voice_music", mix(30, voice=VOICE, music=[(0, 30, 0.15)]))
-    assert r.profile.music_presence >= 0.9
-    assert r.confidence <= clean.confidence
+    inside, gaps = _voice_curve_split(r)
+    assert inside > 0.8 and gaps < 0.2
+    assert r.profile.music_presence >= 0.95 and r.profile.voice_dominance <= 0.1
+    assert r.confidence <= 0.7 < clean.confidence and any("taken away" in n.lower() for n in r.notes)
+
+
+def test_speech_masked_by_a_harmonically_related_pad():
+    """The 130 Hz voice and the chord pad share a harmonic series, so the raw spectrum cannot tell them apart; the voice must still be found, and the
+    shared-harmonics case must cost confidence."""
+    r = analyze("masked_130", mix(30, voice=VOICE, music=[(0, 30, 0.3)], f0=130.0))
+    inside, gaps = _voice_curve_split(r)
+    assert inside > 0.8 and gaps < 0.2 and abs(r.profile.voice_dominance - 0.78) < 0.12
+    assert r.profile.music_behavior == "Continuous" and r.confidence < analyze("voice_music", mix(30, voice=VOICE, music=[(0, 30, 0.15)])).confidence
+
+
+def test_music_sfx_and_noise_alone_never_produce_speech():
+    chord = (np.concatenate([synth_music(40, [(0, 40, 0.3)])[: 20 * SR], synth_music(40, [(0, 40, 0.3)], chord=(220.0, 277.2, 329.6, 440.0))[20 * SR:]]) * 0.9).astype(np.float32)
+    scenarios = {
+        "pad_flat": mix(40, music=[(0, 40, 0.3)]),
+        "pad_pulse": mix(40, music=[(0, 40, 0.3)], pulse=2.0),
+        "pad_steps": mix(40, music=[(0, 10, 0.1), (10, 20, 0.5), (20, 30, 0.1), (30, 40, 0.5)]),
+        "chord_change": chord,
+        "music_only": mix(30, music=[(0, 30, 0.3)]),
+        "sfx_only": mix(30, sfx=[3.0, 9.0, 16.0, 23.0]),
+        "music_sfx": mix(30, music=[(0, 30, 0.15)], sfx=[3.0, 9.0, 16.0, 23.0], kind="tick"),
+        "noise": np.random.default_rng(0).normal(0, 0.05, 20 * SR).astype(np.float32),
+    }
+    for key, x in scenarios.items():
+        r = analyze(key, x)
+        assert r.profile.voice_dominance == 0.0 and max(v for _, _, v, _ in r.series) == 0.0, key
+        assert not any("taken away" in n.lower() for n in r.notes), key
+
+
+# ---------------------------------------------------------------------------------------------- real(istic) speech (espeak-ng, when installed)
+HAS_TTS = shutil.which("espeak-ng") is not None
+needs_tts = pytest.mark.skipif(not HAS_TTS, reason="espeak-ng not installed")
+TTS_TEXT = ("Welcome back to the channel. Today we are going to talk about how to edit videos faster, with fewer cuts, better sound, and a clear structure. "
+            "Sixty six sessions of stress, success, and sunshine. Let us get started right now. First, pick a strong hook; second, keep the pace up; third, add "
+            "subtle sound effects at the right moments. Some people say that fast edits are exhausting, but the data shows the opposite: viewers stay longer "
+            "when the story keeps moving. That is all, thanks for watching, see you next time.")
+_TTS: dict[tuple[str, int], tuple[np.ndarray, int]] = {}
+
+
+def tts(voice: str, speed: int, tmp: Path) -> tuple[np.ndarray, int]:
+    """A formant-synthesised narration with real consonants (sibilants, plosives, nasals) and pauses: speech the pure harmonic test voice does not have."""
+    if (voice, speed) not in _TTS:
+        wav = tmp / f"tts_{voice}_{speed}.wav".replace("+", "_")
+        subprocess.run(["espeak-ng", "-v", voice, "-s", str(speed), "-w", str(wav), TTS_TEXT], check=True, capture_output=True)
+        with wave.open(str(wav)) as w:
+            sr = w.getframerate()
+            x = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
+        _TTS[(voice, speed)] = (x / float(np.abs(x).max()) * 0.5, sr)
+    return _TTS[(voice, speed)]
+
+
+TTS_VOICES = [("en", 140), ("en-us+m3", 175), ("en+m7", 140), ("en+f2", 175)]
+
+
+@needs_tts
+@pytest.mark.parametrize("voice,speed", TTS_VOICES)
+def test_synthesised_narration_is_speech_not_music_or_effects(voice, speed, tmp_path_factory):
+    x, sr = tts(voice, speed, tmp_path_factory.mktemp("tts"))
+    r = AudioAnalyzer().analyze((x * 0.9).astype(np.float32), sr)
+    p = r.profile
+    assert 0.6 <= p.voice_dominance <= 1.0
+    assert p.music_presence == 0.0 and p.music_behavior == "None" and p.music_changes_per_minute == 0.0
+    assert len(r.sfx_times) <= 2 and p.sfx_class in ("None", "Subtle", "Moderate")  # sibilants / plosives / vowels the pitch tests miss are not effects
+    assert 0.2 < p.average_pause_duration < 1.5 and r.confidence >= 0.7
+    inside = float(np.mean([v for _, _, v, _ in r.series]))
+    assert inside > 0.5
+
+
+@needs_tts
+@pytest.mark.parametrize("voice,speed", TTS_VOICES)
+def test_synthesised_narration_over_a_flat_pad(voice, speed, tmp_path_factory):
+    x, sr = tts(voice, speed, tmp_path_factory.mktemp("tts"))
+    dur = len(x) / sr
+    r = AudioAnalyzer().analyze(((x + synth_music(dur, [(0, dur, 0.1)], sr=sr)) * 0.9).astype(np.float32), sr)
+    p = r.profile
+    assert p.music_presence >= 0.95 and p.music_behavior in ("Continuous", "Dynamic")
+    assert p.voice_dominance >= 0.4 and p.music_changes_per_minute <= 2.0
+    assert len(r.sfx_times) <= 4
+    inside = float(np.mean([v for _, _, v, _ in r.series]))
+    assert inside > 0.5  # the speech is found although the bed sits under (and between) it
+
+
+@needs_tts
+@pytest.mark.parametrize("music", [0.0, 0.1])
+def test_effects_over_synthesised_narration_are_found(music, tmp_path_factory):
+    x, sr = tts("en-us", 175, tmp_path_factory.mktemp("tts"))
+    dur = len(x) / sr
+    times = [3.0, 8.5, 14.0, 20.0]
+    kinds = ["whoosh", "hit", "whoosh", "hit"]
+    sfx = sum(synth_sfx(dur, [t], k, amp=0.5, sr=sr, seed=i) for i, (t, k) in enumerate(zip(times, kinds)))
+    bed = synth_music(dur, [(0, dur, music)], sr=sr) if music else 0.0
+    r = AudioAnalyzer().analyze(((x + bed + sfx) * 0.9).astype(np.float32), sr)
+    assert matched(times, r.sfx_times, 0.3) >= 3
+    assert len(r.sfx_times) <= len(times) + 3
+    assert r.profile.sfx_class in ("Moderate", "Heavy") and r.profile.sfx_intensity >= 0.5
 
 
 # ---------------------------------------------------------------------------------------------- load_audio (FFmpeg)

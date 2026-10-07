@@ -15,7 +15,7 @@ Pipeline (numpy only)
 5. Per-event measurements are folded into ``CaptionStats`` / ``TextStats`` with honest confidences.
 
 Classification rules (all fractions are of the frame; a *line height* is the height of one text line)
-* position: ``top`` centre-y < 0.34; ``bottom`` >= 0.62; ``center`` between; ``lower_left`` = lower half, box starts in the left quarter, centre left of 0.45.
+* position: ``top`` centre-y < 0.34; ``bottom`` >= 0.62; ``center`` between; ``lower_left`` = lower half, box starts in the left fifth (x0 <= 0.20), centre left of 0.40, width <= 0.50.
 * LOWER_THIRD: lower_left, line height <= 0.075 and sitting on a background box.
 * NUMBER_CARD: centred, very large (line height >= 0.14), narrow (width <= 0.6), one line, brief (<= 4 s). **The digits are never read**: this is a size /
   shape heuristic, low confidence, and a large single title word can be mistaken for it.
@@ -40,7 +40,11 @@ Traits: large_text (h >= 0.08), high_contrast (strokes have a very strong edge c
 Limits (stated plainly): without OCR, words per caption and characters per line are ESTIMATES from the width/height ratio of the text lines (about 2.1
 characters per unit of width/height, 5.6 characters per word) and are off by +-30 % with other fonts; text smaller than ~3 % of the frame height, text with
 very low contrast, translucent or heavily animated text, and captions over strongly textured, moving footage are missed or unreliable (confidence drops
-accordingly); emphasis needs bright text on a darker outline / backing; has_box needs a box that differs in brightness from the picture around it.
+accordingly); emphasis needs bright text on a darker outline / backing and a highlight in a vivid colour (a pale tint is read as the picture showing through the letters);
+has_box needs a plate at least ~4 px (and 0.18 line heights) clear of the text that differs in brightness from the picture around it; text taller than about a
+quarter of the frame height can be cut into pieces; a pop / fade-in shorter than the sampling interval (0.25 s at 4 fps) is invisible, so ``animated`` is a
+lower bound; a caption identical in place and strokes across the whole video is taken for a logo and ignored; a flat overlay graphic is only found when it pops in
+over a steady picture.
 """
 
 from __future__ import annotations
@@ -98,7 +102,7 @@ class CaptionTextResult:
 
 def position_of(cx: float, cy: float, x0: float, w: float) -> str:
     """Where an event sits (all arguments as fractions of the frame): top | center | bottom | lower_left."""
-    if cy >= 0.5 and x0 <= 0.25 and cx < 0.45 and w <= 0.55:
+    if cy >= 0.5 and x0 <= 0.20 and cx < 0.40 and w <= 0.50:
         return "lower_left"
     return "top" if cy < TOP_Y else "bottom" if cy >= BOTTOM_Y else "center"
 
@@ -521,7 +525,8 @@ class CaptionTextAnalyzer:
         ev.position = position_of(ev.cx, ev.cy, x0 / W, ev.rel_w)
         frames = ev.b - ev.a + 1
         c = 0.20 + 0.35 * ev.evidence + 0.25 * ev.score + 0.10 * min(1.0, frames / 6.0) + 0.10 * _ramp(ev.rel_h, 0.025, 0.05) - 0.35 * ev.busy
-        ev.confidence = float(clamp(c, 0.05, 0.95))
+        small = 0.55 + 0.45 * _ramp(ev.line_h / max(det.scale, 1e-3), 8.0, 16.0)  # text only 8-16 px tall (at 270 p) is near the limit of what edges can show
+        ev.confidence = float(clamp(c * small, 0.05, 0.95))
 
     # ------------------------------------------------------------------ classification
     def _classify(self, evs: list[_Ev], duration: float) -> None:
@@ -766,8 +771,9 @@ class _Ctx:
         E_in = self.E[w0:w1][:, inside].astype(np.float32).mean(axis=1) / 255.0
 
         def bg(i: int, j: int) -> float:
-            """How much the rest of the picture changed between samples i and j."""
-            return float(np.abs(Lo[min(max(i, w0), w1 - 1) - w0] - Lo[min(max(j, w0), w1 - 1) - w0]).mean())
+            """How much the rest of the picture changed between samples i and j: the 60th percentile of the block changes, so a change confined to a compact region (a
+            graphic popping in, a hand moving) does not count as 'the picture changed' -- only a cut, a pan, a zoom or other movement spread over most of the frame."""
+            return float(np.percentile(np.abs(Lo[min(max(i, w0), w1 - 1) - w0] - Lo[min(max(j, w0), w1 - 1) - w0]), 60))
 
         def factor(ch: float) -> float:
             return 1.0 - clamp((ch - BG_STEP) / (BG_FULL * 0.45))

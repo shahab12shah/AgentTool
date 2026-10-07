@@ -13,10 +13,12 @@ How it works (everything is relative to the soundtrack's own level, so it needs 
   peaks* (>= 8 dB over their spectral surroundings) is tonal, i.e. music; a flat, structureless floor is room tone / noise and is NOT counted as music. The
   floor level is the music level, also underneath speech, so the level during speech can be compared with the level in the gaps (ducking).
 * **Speech** = runs of voiced frames (harmonic, above the activity gate) that bridge gaps shorter than 0.25 s, last >= 0.3 s and contain syllable-rate
-  energy peaks. Gaps between speech runs are *pauses*.
+  energy peaks. Gaps between speech runs are *pauses*. A second pass looks at what is left of the spectrum once the bed's floor is taken away (voice under
+  or among loud music: a comb of harmonics, or formant-shaped energy in syllables) and adds the runs the raw test missed.
 * **SFX** = short (< 1.2 s) bursts of energy ABOVE the stationary floor that are not speech: any burst in non-speech context, and (inside speech) only bursts
-  that stick out of their high-band / low-band neighbourhood (noise whooshes, clicks, thumps; sibilants do not). Detections within 0.3 s merge; regular
-  trains (a beat) are rhythm, not effects.
+  that stick out of their high-band / low-band neighbourhood (noise whooshes, clicks, thumps). Detections within 0.3 s merge; regular trains (a beat) are
+  rhythm, not effects. A burst whose spectrum is a sibilant's (energy only above 3.5 kHz / 1 kHz) or, outside the speech mask, a vowel's (formant-shaped,
+  falling away above 3.5 kHz) is speech the pitch tests did not claim, not an effect.
 * **Silence** = frames below an adaptive floor (a few dB above the file's own quiet level, never above 25 dB under its loud level).
 
 Confidence is honest: short audio, near-threshold classifications, speech that cannot be told from music, clipped or very quiet audio and a noise bed
@@ -60,13 +62,17 @@ PEAK_CONTRAST_DB = 8.0  # a floor bin this far above its spectral surroundings i
 PEAK_SURROUND_HZ = 375.0  # half-width of the surroundings the contrast is measured against
 TONAL_ACTIVE = 0.50  # share of floor energy in tonal peaks that makes a window musical (a little more is asked while speech is on)
 TONAL_SPEECH_EXTRA = 0.15
-MUSIC_ABS_GATE_DB = -65.0  # the floor must be audible: above this and within 42 dB of the loud level
-MUSIC_REL_GATE_DB = 42.0
+MUSIC_ABS_GATE_DB = -65.0  # the floor must be audible: above this and within 36 dB of the loud level
+MUSIC_REL_GATE_DB = 36.0
 MUSIC_MIN_RUN = 3  # steps (1.5 s): shorter "music" is a tone blip
 MUSIC_FILL_GAP = 2  # steps: a dropout this short (a hit, a loud syllable burst) does not end the bed
 MUSIC_SPEECH_BRIDGE = 10  # steps (5 s): the longest stretch of speech a deeply ducked bed may disappear into and still be the same bed
 
 CPP_LO_HZ, CPP_HI_HZ = 70.0, 4000.0
+CPP_RESIDUAL_VOICED = 6.0  # the same test on what is left of the spectrum once the stationary floor (the bed) is taken away
+SPEECH_ROLLOFF_DB = 12.0  # speech-shaped foreground: the 120 Hz-3.5 kHz bands this far over the high band (and 10 dB over the thump band)
+SHAPED_REL_DB = 30.0  # ... and within this of the loud level
+RESIDUAL_MIN_EXTRA_S = 1.0  # speech only the residual test finds must add up to this much before it is trusted
 CPP_VOICED = 5.0  # cepstral peak / cepstral level: noise, chords and bursts sit at 1.4-3.7, voiced speech at 7-20
 ACF_VOICED = 0.55  # normalised autocorrelation peak at a voice pitch (80-350 Hz): voiced speech 0.6-0.8, chords <= 0.5, noise / bursts / thumps ~0
 ACF_LO_HZ, ACF_HI_HZ = 80.0, 350.0
@@ -98,6 +104,8 @@ SFX_BAND_GATE_REL_DB = 13.0  # a band burst (high / low band only) must reach wi
                             # high band sits ~20 dB under its loud level, a sibilant ~12-15 dB, a whoosh within a few dB; the stick-out test does the rest)
 SFX_SPEECH_DILATE_S = 0.2  # speech context reaches this far past a speech run (unvoiced consonants hang off its edges)
 SFX_SPEECH_COVER = 0.25  # an event that overlaps speech this much is judged by its band signature only
+BAND_WIDTH_DB = {"lb": 10.0 * np.log10(90.0), "lo": 10.0 * np.log10(880.0), "mid": 10.0 * np.log10(2500.0)}  # widths (Hz, as dB) of the 30-120 / 120-1000 / 1000-3500 Hz bands
+SFX_VOWEL_DB, SFX_SIBILANT_DB, SFX_FRICATIVE_DB, SFX_ROLLOFF_DB = 7.0, 8.0, 14.0, 12.0  # spectral signatures of speech sounds that are not effects (see _speech_signature)
 SFX_EQUAL_INTENSITY, SFX_INTENSITY_SPAN_DB = 0.75, 24.0  # intensity of an effect as loud as the speech's peaks; dB for the full 0..1 scale
 SFX_ALIGN_BEFORE_S, SFX_ALIGN_AFTER_S = 0.15, 0.4  # an effect is "on" a boundary when it starts up to 0.15 s before .. 0.4 s after it
 
@@ -135,7 +143,7 @@ def _has_audio_stream(ffmpeg: FFmpegService, path: Path) -> bool | None:
         return None
     try:
         r = subprocess.run([probe, "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", str(path)], capture_output=True, text=True,
-                           timeout=60, encoding="utf-8", errors="replace", **_NO_WINDOW)
+                           timeout=60, encoding="utf-8", errors="replace", check=False, **_NO_WINDOW)
     except (OSError, subprocess.SubprocessError) as exc:
         raise ReferenceAnalysisError("The reference file could not be inspected.", details=str(exc)) from exc
     if r.returncode != 0:
@@ -400,12 +408,12 @@ class _Run:
 
     # ------------------------------------------------------------------ orchestration
     def result(self) -> AudioResult:
-        s = self.spec
         if self.loud < -75.0:
             return self._silent_result()
         self.thr_sil = self._silence_threshold()
         self._speech()
         self._floor_and_music()
+        self._residual_speech()
         self._silences_and_pauses()
         self.edge_zone = self._speech_edge_zone(1.0)
         self._ducking()
@@ -433,29 +441,76 @@ class _Run:
         s = self.spec
         act = max(-72.0, self.loud - ACTIVITY_REL_DB)
         voiced = (s.E >= act) & ((s.acf >= ACF_VOICED) | (s.cpp >= CPP_VOICED))
-        bridge = max(1, int(round(BRIDGE_S / s.hop_s)) - 1)
-        merged = _close_gaps(voiced, bridge)
+        self.voiced = voiced
+        self._set_speech(self._speech_runs(voiced, s.E))
+        self.masked_share = 0.0
+
+    def _speech_runs(self, voiced: np.ndarray, energy: np.ndarray) -> np.ndarray:
+        """Voiced frames -> speech frames: gaps shorter than 0.25 s are bridged, and a run must last >= 0.3 s, be voiced for a quarter of it and show at least
+        two syllable-rate energy peaks (``energy``, dB)."""
+        hs = self.spec.hop_s
+        merged = _close_gaps(voiced, max(1, int(round(BRIDGE_S / hs)) - 1))
         mask = np.zeros(self.T, dtype=bool)
-        smooth = np.convolve(s.E, np.ones(3, dtype=np.float32) / 3.0, mode="same")
+        smooth = np.convolve(energy, np.ones(3, dtype=np.float32) / 3.0, mode="same")
         for a, b in _runs(merged):
             n_v = int(voiced[a:b].sum())
-            length = (b - a) * s.hop_s
-            if length < SPEECH_MIN_S or n_v / (b - a) < SPEECH_MIN_DENSITY:
+            if (b - a) * hs < SPEECH_MIN_S or n_v / (b - a) < SPEECH_MIN_DENSITY:
                 continue
             if _count_peaks(smooth[a:b], SYLLABLE_PROMINENCE_DB) < 2:
                 continue  # one sustained harmonic sound (a held note, a siren) is not syllabic speech
             mask[a:b] = True
-        self.voiced, self.speech = voiced, mask
+        return mask
+
+    def _set_speech(self, mask: np.ndarray) -> None:
+        self.speech = mask
         self.speech_runs = _runs(mask)
-        # speech share per step
-        cs = np.concatenate(([0], np.cumsum(mask)))
+        cs = np.concatenate(([0], np.cumsum(mask)))  # speech share per step
         n = np.maximum(self.w_hi - self.w_lo, 1)
         self.speech_frac = (cs[self.w_hi] - cs[self.w_lo]) / n
+
+    def _residual_speech(self) -> None:
+        """Speech that the raw spectrum hides: under music much louder than the voice the frames look like the bed, but once the bed's stationary floor is taken
+        away what is left of a voice is still a comb of harmonics (cepstral peak 10-20; the left-over of a pad, a beat, a whoosh or noise sits at 1.5-2.5), and it
+        still comes in syllables. Runs found that way are added to the speech mask (and the bed is re-estimated knowing where they are)."""
+        s = self.spec
+        T = self.T
+        sel = (s.freqs >= CPP_LO_HZ) & (s.freqs <= CPP_HI_HZ)
+        nsel = int(sel.sum())
+        cwin = np.hanning(nsel).astype(np.float32)
+        df = float(s.freqs[1] - s.freqs[0])
+        q_sec = np.fft.rfftfreq(4 * nsel, d=1.0) / df
+        qpk = (q_sec >= 1.0 / 400.0) & (q_sec <= 1.0 / 80.0)
+        qbase = (q_sec >= 0.0005) & (q_sec <= 0.02)
+        cpp = np.zeros(T, dtype=np.float32)
+        er = np.zeros(T, dtype=np.float32)
+        shaped = np.zeros(T, dtype=bool)
+        bands = [(s.freqs >= lo) & (s.freqs < hi) for lo, hi in ((30.0, 120.0), (120.0, 1000.0), (1000.0, 3500.0), (3500.0, 8000.0))]
+        for a in range(0, T, 1024):
+            b = min(T, a + 1024)
+            R = np.maximum(s.P[a:b] - self.F_fg[self.frame_win[a:b]], 0.0)
+            er[a:b] = _db(R.sum(axis=1))
+            lb, lo, mid, hb = (_db(R[:, m].sum(axis=1)) for m in bands)
+            # formant-shaped: energy in BOTH the low-mid and mid bands (a pad's residual has none above 1 kHz), well over the high band and the thump band
+            shaped[a:b] = (mid >= lo - 15.0) & (np.maximum(lo, mid) - hb >= SPEECH_ROLLOFF_DB) & (np.maximum(lo, mid) - lb >= SPEECH_ROLLOFF_DB - 2.0)
+            L = 10.0 * np.log10(R[:, sel] + 1e-14)
+            L = np.maximum(L, L.max(axis=1, keepdims=True) - 40.0)
+            L -= L.mean(axis=1, keepdims=True)
+            C = np.abs(np.fft.rfft(L * cwin, 4 * nsel, axis=1))
+            cpp[a:b] = C[:, qpk].max(axis=1) / (C[:, qbase].mean(axis=1) + 1e-9)
+        voiced = (er >= max(-72.0, self.loud - ACTIVITY_REL_DB)) & ((cpp >= CPP_RESIDUAL_VOICED) | (shaped & (er >= self.loud - SHAPED_REL_DB)))
+        found = self._speech_runs(voiced, er)
+        extra = found & ~self.speech
+        if float(extra.sum()) * s.hop_s < RESIDUAL_MIN_EXTRA_S:
+            return
+        union = self.speech | found
+        self.masked_share = float(extra.sum()) / max(1, int(union.sum()))
+        self._set_speech(union)
+        self._floor_and_music()  # the bed is estimated differently around speech
 
     # ------------------------------------------------------------------ stationary floor, tonality, music
     def _floor_and_music(self) -> None:
         s = self.spec
-        T, W, K = self.T, self.W, s.P.shape[1]
+        W, K = self.W, s.P.shape[1]
         F = np.empty((W, K), dtype=np.float32)
         # frames within 0.35 s of speech carry speech (and the bed's duck ramps): a window that is in a gap between speech takes its floor from the clean
         # frames only, so a short gap still shows the bed's real (un-ducked) level
@@ -643,14 +698,17 @@ class _Run:
                 stable = core if core.sum() >= 4 else m
             v = (lvl + (self.duck_db if self.duck_ok else 0.0) * (self.speech_frac >= 0.5))[stable]
             spread = float(np.percentile(v, 90) - np.percentile(v, 10))
-            # texture intensity: how far the bed's mean power stands above its stationary floor in speech-free, effect-free steps (a beat or swell leaves the
-            # mean well above the floor; a flat pad does not)
-            cs = np.concatenate(([0.0], np.cumsum(s.P.sum(axis=1))))
+            # texture intensity: how far the bed's mean power stands above its stationary floor in speech-free steps (a beat or swell leaves the mean well
+            # above the floor; a flat pad does not). Measured in the bed's own spectral peaks only, so speech the mask missed hardly counts.
+            tmpl = np.median(self.F[m][:, self.tonal_sel], axis=0)
+            cols = np.flatnonzero(self.tonal_sel)[tmpl >= tmpl.max() * 0.05]
+            cs = np.concatenate(([0.0], np.cumsum(s.P[:, cols].sum(axis=1))))
             n = np.maximum(self.w_hi - self.w_lo, 1)
             mean_db = _db((cs[self.w_hi] - cs[self.w_lo]) / n)
+            floor_db = _db(self.F[:, cols].sum(axis=1))
             clean = m & (self.speech_frac < 0.05) & ~zone
             if clean.sum() >= 3:
-                crest = float(np.median(mean_db[clean] - lvl[clean]))
+                crest = float(np.median(mean_db[clean] - floor_db[clean]))
         self.spread, self.crest = spread, crest
         self.music_dynamics = clamp(spread / DYNAMICS_SPREAD_DB + 0.5 * clamp((crest - 1.5) / 4.0)) if m.sum() >= 4 else 0.0
         self._music_changes()
@@ -721,7 +779,9 @@ class _Run:
         lb_m = (s.freqs >= 30.0) & (s.freqs <= 120.0)
         hb_hi = min(MAX_HZ, 0.98 * self.sr / 2)
         hb_m = (s.freqs >= 3500.0) & (s.freqs <= hb_hi)
-        n_tot, n_lb, n_hb = np.zeros(T), np.zeros(T), np.zeros(T)
+        lo_m = (s.freqs > 120.0) & (s.freqs < 1000.0)
+        mid_m = (s.freqs >= 1000.0) & (s.freqs < 3500.0)
+        n_tot, n_lb, n_hb, n_lo, n_mid = (np.zeros(T) for _ in range(5))
         for w in range(self.W):
             a, b = self.w_lo[w], self.w_hi[w]
             if b <= a:
@@ -729,6 +789,8 @@ class _Run:
             sub = np.maximum(s.P[a:b] - FG_OVER * self.F_fg[w], 0.0)
             n_tot[a:b] = sub[:, tot_m].sum(axis=1)
             n_lb[a:b] = sub[:, lb_m].sum(axis=1)
+            n_lo[a:b] = sub[:, lo_m].sum(axis=1)
+            n_mid[a:b] = sub[:, mid_m].sum(axis=1)
             if hb_m.any():
                 n_hb[a:b] = sub[:, hb_m].sum(axis=1)
 
@@ -755,6 +817,8 @@ class _Run:
                     ctx = self._context(ser, pk, bursts)
                     if len(ctx) >= 20 and (ser[pk] < float(np.percentile(ctx, 90)) + SFX_STICKOUT_DB or ser[pk] < float(ctx.max()) + 2.0):
                         continue  # no louder than its own neighbourhood (a sibilant, a bass note)
+                if self._speech_signature(pk, n_lb, n_lo, n_mid, n_hb, cover >= SFX_SPEECH_COVER):
+                    continue  # its spectrum is a vowel's or a sibilant's, not an effect's
                 events.append((on, off, pk, float(ser[pk])))
         events.sort(key=lambda e: e[0])
         merged: list[list[int | float]] = []
@@ -786,6 +850,28 @@ class _Run:
             "text": self._share_on(self.sfx_times, self.texts),
             "reveals": self._share_on(self.sfx_times, self.changes),
         }
+
+    def _speech_signature(self, pk: int, n_lb: np.ndarray, n_lo: np.ndarray, n_mid: np.ndarray, n_hb: np.ndarray, in_speech: bool) -> bool:
+        """True when the foreground energy at ``pk`` is shaped like a speech sound rather than an effect (band powers are compared per Hz, so flat noise reads flat):
+
+        * a *sibilant*: nearly all of it above 3.5 kHz (8 dB over every other band), or above 1 kHz with next to nothing under it (14 dB). A whoosh or a click
+          spreads over the low-mid band too, a hit is led by its thump;
+        * a *vowel*, only for a burst the speech mask does not cover (a voiced sound the pitch tests missed): energy density falls 7 dB or more from the
+          120-1000 Hz band to the 1-3.5 kHz band, or everything is under 3.5 kHz and falls away 12 dB above it, and there is no low-frequency thump (a
+          formant-shaped spectrum; noise is flat, a click flat or rising).
+
+        Needs the high band, so narrow-band files are not judged."""
+        if self.sr < 14000:
+            return False
+        a, b = max(0, pk - 1), pk + 2
+        lb, lo, mid, hb = (float(_db(float(np.mean(n[a:b])))) for n in (n_lb, n_lo, n_mid, n_hb))
+        if hb - max(lb, lo, mid) >= SFX_SIBILANT_DB or min(mid, hb) - max(lb, lo) >= SFX_FRICATIVE_DB:
+            return True
+        d_lb, d_lo, d_mid = lb - BAND_WIDTH_DB["lb"], lo - BAND_WIDTH_DB["lo"], mid - BAND_WIDTH_DB["mid"]
+        if in_speech or d_lb > d_lo + 3.0:
+            return False
+        voice = max(lo, mid)
+        return d_lo - d_mid >= SFX_VOWEL_DB or (voice - hb >= SFX_ROLLOFF_DB and voice - lb >= SFX_ROLLOFF_DB - 2.0)
 
     def _effect_power(self, n_tot: np.ndarray, on: int, off: int) -> float:
         """Peak foreground power of an effect over frames ``on..off``. Where speech runs under it, the speech's own typical foreground power (median of the
@@ -906,7 +992,6 @@ class _Run:
 
     # ------------------------------------------------------------------ assemble
     def _voice_dominance(self) -> float:
-        s = self.spec
         nonsil = ~self.sil_frames
         if nonsil.sum() == 0:
             return 0.0
@@ -921,7 +1006,6 @@ class _Run:
         return float(clamp(dom_frames.sum() / max(1, int(nonsil.sum()))))
 
     def _finish(self) -> AudioResult:
-        s = self.spec
         dur, minutes = self.dur, self.minutes
         prof = AudioProfile(has_audio=True)
         prof.voice_dominance = round(self._voice_dominance(), 4)
@@ -987,6 +1071,10 @@ class _Run:
         if amb_share > 0.1:
             c *= 1.0 - 0.5 * min(1.0, amb_share)
             self.notes.append("Part of the audio sits between 'music' and 'not music': the music figures are less certain.")
+        if self.masked_share > 0.1:
+            c *= 0.9 if self.masked_share < 0.3 else 0.8 if self.masked_share < 0.6 else 0.65
+            self.notes.append("Part of the speech could only be found once the music was taken away (it sits under music, or overlaps it heavily): "
+                              "the voice / music shares are less certain.")
         if both:
             overlap = float((speech_any & self.music).sum()) / max(1, int(speech_any.sum()))
             if overlap > 0.3 and not self.duck_ok:

@@ -16,6 +16,11 @@ How a line is found
 * **text-likeness** (0..1) of a line is a soft AND of: height in a plausible range, aspect ratio, edge density (not blank, not solid noise), a balance of
   horizontal and vertical stroke edges, and how *sharply* the band stands out from the rows just above and below it (a text line is a band; texture is not).
 
+* **large text** (number cards, giant titles): thick strokes have an empty interior, so one glyph row produces several peaks in the row profile and falls apart
+  into "lines". A second detector therefore looks at a copy of the frame shrunk by 3, where such glyphs have the size of ordinary text, and its result replaces
+  the fragments only if they are stacked slices of one row of tall glyphs (stems running through all rows), never two ordinary lines. Text taller than about a
+  quarter of the frame height can still be cut into pieces.
+
 This is a heuristic with real limits (see ``caption_analyzer`` module doc): it cannot tell text from a repeating texture by shape alone, which is why the
 analyzer only believes a region that behaves like an overlay over time.
 """
@@ -276,14 +281,17 @@ class TextRegionDetector:
     def _shrink(rgb: np.ndarray) -> np.ndarray:
         """Block-average by COARSE (area filter, so strokes thinner than a block fade and thick ones stay)."""
         h, w = rgb.shape[0] // COARSE * COARSE, rgb.shape[1] // COARSE * COARSE
-        return rgb[:h, :w].reshape(h // COARSE, COARSE, w // COARSE, COARSE, 3).mean(axis=(1, 3))
+        out = np.zeros((h // COARSE, w // COARSE, 3), dtype=np.float32)
+        for dy in range(COARSE):  # strided slices are several times faster than a reshape-and-mean over two axes
+            for dx in range(COARSE):
+                out += rgb[dy:h:COARSE, dx:w:COARSE]
+        return out / np.float32(COARSE * COARSE)
 
     def _merge_scales(self, fine: list[LineObs], big: list[LineObs], ex: np.ndarray) -> list[LineObs]:
         """Large text found at the coarse scale replaces the fragments the full-resolution pass made of it. A coarse line only counts if it is large (>= BIG_LINE of
-        the frame height), clearly text-like, filled by full-resolution fragments (not a plate with margins around a smaller line) and built like ONE row of tall
-        glyphs: vertical stroke edges (stems) run through all of its rows. Two lines of ordinary
-        text that the shrunk frame merged into one band never have that (their stems stop in the gap between the lines). A fine line that already spans
-        the coarse one (ordinary text) is kept as it is."""
+        the frame height), clearly text-like, filled by SEVERAL stacked full-resolution fragments (a single fine line is already whole; a plate with margins around a
+        smaller line is not text) and built like ONE row of tall glyphs: vertical stroke edges (stems) run through all of its rows. Two lines of ordinary text that
+        the shrunk frame merged into one band never have that (their stems stop in the gap between the lines)."""
         out = list(fine)
         for b in big:
             if b.text_score < 0.55 or b.h * COARSE < BIG_LINE * self.height:
@@ -291,9 +299,12 @@ class TextRegionDetector:
             box = (b.x0 * COARSE, b.y0 * COARSE, b.x1 * COARSE, b.y1 * COARSE)
             bh, bw = box[3] - box[1], box[2] - box[0]
             inside = [f for f in out if _inside(f, box)]
-            if not inside or any(f.h >= 0.8 * bh and f.w >= 0.6 * bw for f in inside):
+            if not inside:
                 continue
-            if max(f.y1 for f in inside) - min(f.y0 for f in inside) < 0.75 * bh:  # fragments fill their glyph row; text on a plate leaves the plate's margin around it
+            union_h = max(f.y1 for f in inside) - min(f.y0 for f in inside)
+            if union_h <= 1.2 * max(f.h for f in inside):  # one fine line (or lines side by side): the full-resolution pass already found it whole
+                continue
+            if union_h < 0.75 * bh:  # fragments fill their glyph row; text on a plate leaves the plate's margin around it
                 continue
             if _stem_continuity(ex[box[1]:box[3], box[0]:box[2]]) < STEM_MIN:
                 continue
@@ -441,7 +452,7 @@ class TextRegionDetector:
         H, W = luma.shape
         h = y1 - y0
         pmax = int(max(8, min(40, 1.6 * h + 8)))
-        pmin = 3
+        pmin = max(4, int(round(0.18 * h)))  # closer than this the dark outline / glow of the glyphs themselves would look like a plate edge
         steps: list[np.ndarray] = []  # signed step (inside - outside) for p = pmin..pmax per side
 
         def prof(side: str) -> np.ndarray | None:
@@ -535,5 +546,5 @@ class TextRegionDetector:
         mm[core] = minority
         col_core = core.sum(axis=0)
         col_flag = (col_core > 0) & (mm.sum(axis=0) >= 0.6 * np.maximum(col_core, 1))
-        best = max((b - a for a, b in _close_runs(_runs(col_flag), 2)), default=0)
+        best = max((b - a for a, b in _close_runs(_runs(col_flag), max(2, int(0.4 * h)))), default=0)  # the gaps between letters (up to ~0.4 line heights) do not break a word
         return (share if best >= max(4, int(0.09 * w)) else 0.0), True  # a highlighted word is at least ~9 % of its line

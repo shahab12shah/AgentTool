@@ -182,6 +182,7 @@ class _Work:
         self._ao: list[OverrideRecord] | None = None
         self._pd: dict[str, PresentationDecision] | None = None
         self._po: list[PresentationOverride] | None = None
+        self._cs: CaptionSettings | None = None  # the caption settings as the batch leaves them (one SetSettingCommand at the end)
 
     def clone(self) -> "_Work":
         w = _Work.__new__(_Work)
@@ -191,7 +192,11 @@ class _Work:
         w.flip, w.deleted, w.extra = list(self.flip), list(self.deleted), list(self.extra)
         w._ed, w._ao = (copy.deepcopy(self._ed), copy.deepcopy(self._ao)) if self._ed is not None else (None, None)
         w._pd, w._po = (copy.deepcopy(self._pd), copy.deepcopy(self._po)) if self._pd is not None else (None, None)
+        w._cs = copy.deepcopy(self._cs)
         return w
+
+    def caption_settings(self) -> CaptionSettings:
+        return self._cs if self._cs is not None else self.project.caption_settings
 
     # ---- clips
     def put(self, after: Clip, flip: bool = True) -> None:
@@ -372,7 +377,8 @@ class QCFixEngine:
         """Apply every fix that is safe AND permitted "auto", in ONE undo step. Everything else is skipped (see ``last_skipped``)."""
         project = self._project()
         wanted = set(issue_ids) if issue_ids is not None else None
-        members = [i for i in project.qc_issues if i.active and i.fix is not None and (wanted is None or i.issue_id in wanted) and (not code_prefix or i.code.startswith(code_prefix))]
+        members = [i for i in project.qc_issues if i.active and i.fix is not None and self._is_command(i.fix) and (wanted is None or i.issue_id in wanted)
+                   and (not code_prefix or i.code.startswith(code_prefix))]
         label = "Fix All " + self._batch_label(code_prefix) if code_prefix else "Fix all safe issues"
         return self._batch(project, members, confirmed=False, safe_only=True, label=label)
 
@@ -412,11 +418,12 @@ class QCFixEngine:
             if svc is not None and bool(getattr(svc, "running", False)):
                 raise QCError(f"{what} is being generated. Wait for it to finish, then try again.")
 
-    def _prepare(self, project: Project, issue: QCIssue, work: _Work | None = None, baseline: dict | None = None) -> tuple[_Plan, bool, _Work]:
+    def _prepare(self, project: Project, issue: QCIssue, work: _Work | None = None, baseline: dict | None = None, *, validate: bool = True) -> tuple[_Plan, bool, _Work]:
         work = work if work is not None else _Work(project)
         plan = self._plan(work, issue)
         self._check_structure(work)
-        self._validate(project, work, baseline if baseline is not None else self._errors(project, project.timeline))
+        if validate:
+            self._validate(project, work, baseline if baseline is not None else self._errors(project, project.timeline))
         return plan, self._is_safe(project, issue, plan), work
 
     def _plan(self, work: _Work, issue: QCIssue) -> _Plan:
@@ -439,7 +446,7 @@ class QCFixEngine:
             return handler(work, issue, spec)
         except QCError:
             raise
-        except (KeyError, TypeError, ValueError, IndexError) as exc:  # a malformed recipe is a stale / foreign issue, never a crash
+        except (KeyError, TypeError, ValueError, IndexError, AttributeError) as exc:  # a malformed recipe is a stale / foreign issue, never a crash
             _log.warning("QC fix %s: unusable parameters (%s)", spec.kind, exc)
             raise QCError(STALE) from exc
 
@@ -498,22 +505,41 @@ class QCFixEngine:
             return []
         self._guard_busy()
         members = sorted(members, key=lambda i: (i.start_time if i.start_time is not None else 1e12, i.issue_id))
-        work, applied = _Work(project), []
         baseline = self._errors(project, project.timeline)
-        for issue in members:
-            trial = work.clone()
-            try:
-                plan, safe, trial = self._prepare(project, issue, trial, baseline)
-                if not safe and (safe_only or not confirmed):
-                    raise QCError("Needs your confirmation: it changes your edit.")
-            except QCError as exc:
-                self.last_skipped.append(SkippedFix(issue.issue_id, issue.code, exc.user_message))
-                continue
-            work = trial
-            applied.append((issue, plan, safe, bool(confirmed and not safe)))
+        # The validators are the slow part: check the whole batch once, and only when that finds a new problem check member by member to find who causes it.
+        try:
+            work, applied, skipped = self._batch_pass(project, members, confirmed, safe_only, baseline, validate_each=False)
+            if applied:
+                self._validate(project, work, baseline)
+        except QCError:
+            work, applied, skipped = self._batch_pass(project, members, confirmed, safe_only, baseline, validate_each=True)
+        self.last_skipped = skipped
         if not applied:
             return []
         return self._commit(project, work, applied, label, checkpoint=True, strict_checkpoint=any(p.destructive for _i, p, _sf, _cf in applied))
+
+    def _batch_pass(self, project: Project, members: list[QCIssue], confirmed: bool, safe_only: bool, baseline: dict, *, validate_each: bool
+                    ) -> tuple[_Work, list[tuple[QCIssue, _Plan, bool, bool]], list[SkippedFix]]:
+        work: _Work = _Work(project)
+        applied: list[tuple[QCIssue, _Plan, bool, bool]] = []
+        skipped: list[SkippedFix] = []
+        for issue in members:
+            trial = work.clone()  # a member that fails leaves no trace in the batch
+            try:
+                plan, safe, trial = self._prepare(project, issue, trial, baseline, validate=validate_each)
+                if not safe and (safe_only or not confirmed):
+                    raise QCError("Needs your confirmation: it changes your edit.")
+            except QCError as exc:
+                skipped.append(SkippedFix(issue.issue_id, issue.code, exc.user_message))
+                continue
+            work = trial
+            applied.append((issue, plan, safe, bool(confirmed and not safe)))
+        return work, applied, skipped
+
+    @staticmethod
+    def _is_command(spec: QCFixSpec) -> bool:
+        info = CATALOG.get(spec.kind)
+        return info is not None and info.route is FixRoute.COMMAND
 
     @staticmethod
     def _batch_label(prefix: str | None) -> str:
@@ -554,6 +580,8 @@ class QCFixEngine:
         if work.changes_timeline:
             cmds.append(_EditCommand(project, description, work))
         cmds += [c for _scope, c in work.extra]
+        if work._cs is not None:
+            cmds.append(SetSettingCommand(project, "caption_settings", work._cs, "Change caption settings"))
         for cid in work.flip:
             if cid not in work.deleted and work.edited.get(cid) is not None:
                 cmd = self._ownership(project, cid, "edit")
@@ -665,9 +693,9 @@ class QCFixEngine:
         name = RESTYLE_ALIASES.get(str(spec.params["field"]), str(spec.params["field"]))
         if name not in RESTYLE_FIELDS:
             raise QCError("That caption setting cannot be changed by QC.")
-        cs = work.project.caption_settings
-        if name in cs.user_set:
+        if name in work.project.caption_settings.user_set:
             raise QCError("You chose this caption setting yourself: QC does not change it.")
+        cs = work.caption_settings()
         cur = getattr(cs, name)
         raw = spec.params["value"]
         if isinstance(cur, bool):
@@ -689,7 +717,7 @@ class QCFixEngine:
             raise QCError(problem)
         if name not in new.user_set:
             new.user_set.append(name)  # a later reference style must not override a setting the user confirmed
-        work.extra.append(("editing", SetSettingCommand(work.project, "caption_settings", new, "Change caption settings")))
+        work._cs = new
         return _Plan("caption.restyle", spec.summary or "Change a caption setting", {name: cur}, {name: value},
                      ["Applies to captions created from now on; existing captions are not laid out again."])
 
@@ -745,7 +773,7 @@ class QCFixEngine:
         after_v = {"clip end": _s(after.timeline_end), "clip duration": _s(after.duration)}
         if extra_before and "gap" in extra_before:
             after_v["gap"] = _s(max(0.0, want_end - after.timeline_end))
-        return _Plan(kind, summary, before, after_v, lines, grown <= limit + 1e-9)
+        return _Plan(kind, summary, before, after_v, lines, grown <= limit + 1e-9 and short <= 0.001)
 
     def _clip_extend(self, work: _Work, issue: QCIssue, spec: QCFixSpec) -> _Plan:
         return self._extend(work, str(spec.params["clip_id"]), float(spec.params["new_end"]), strict=False, kind="clip.extend", summary=spec.summary or "Extend the clip")
