@@ -128,7 +128,9 @@ class SceneService:
         return SceneState.UP_TO_DATE
 
     def user_touched_labels(self) -> list[str]:
-        return [s.label for s in self._project().scenes if s.is_user_touched]
+        project = self._project()
+        return [s.label for s in project.scenes
+                if s.is_user_touched or s.id in project.visual_assignments]  # an approved/selected visual is a user decision too
 
     # ------------------------------------------------------------ pipeline
     def analyze(self, force: bool = False, overwrite_user_edits: bool = False,

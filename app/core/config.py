@@ -30,6 +30,17 @@ class Settings:
     api_base_url: str = ""  # OpenAI-compatible endpoint, e.g. https://api.openai.com/v1
     api_model: str = "whisper-1"
     api_key_env: str = "OPENAI_API_KEY"
+    # Phase 3: visual research. Only the NAMES of environment variables are stored, never keys.
+    local_stock_dir: str = ""  # folder of licensed/owned stock media searched by the local provider
+    wikimedia_api_url: str = ""  # empty = https://commons.wikimedia.org/w/api.php
+    youtube_api_url: str = ""
+    youtube_key_env: str = "YOUTUBE_API_KEY"
+    pexels_api_url: str = ""
+    pexels_key_env: str = "PEXELS_API_KEY"
+    ai_image_base_url: str = ""
+    ai_image_model: str = "gpt-image-1"
+    ai_image_key_env: str = "OPENAI_API_KEY"
+    chromium_path: str = ""  # empty = auto-detect
 
     def sanitized(self) -> "Settings":
         """Return a copy with out-of-range values replaced by safe ones."""
@@ -40,7 +51,9 @@ class Settings:
         if s.theme not in THEMES:
             s.theme = "dark"
         for name in ("default_project_location", "ffmpeg_path", "ffprobe_path", "transcription_language", "whisper_model",
-                     "api_base_url", "api_model", "api_key_env"):
+                     "api_base_url", "api_model", "api_key_env", "local_stock_dir", "wikimedia_api_url", "youtube_api_url",
+                     "youtube_key_env", "pexels_api_url", "pexels_key_env", "ai_image_base_url", "ai_image_model",
+                     "ai_image_key_env", "chromium_path"):
             if not isinstance(getattr(s, name), str):
                 setattr(s, name, getattr(Settings(), name))
         if s.transcription_provider not in ("auto", "faster-whisper", "api", "pocketsphinx"):

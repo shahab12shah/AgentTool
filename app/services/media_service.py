@@ -96,7 +96,11 @@ class MediaService:
             "media.import", work, title=f"Importing {path.name}", on_complete=done, on_error=self._fail, on_cancel=cancelled
         )
 
-    def _register(self, project: Project, prepared: PreparedMedia) -> Asset | None:
+    def register_prepared(self, project: Project, prepared: PreparedMedia, **provenance) -> Asset | None:
+        """Register media prepared elsewhere (e.g. an acquired research candidate) with its provenance."""
+        return self._register(project, prepared, **provenance)
+
+    def _register(self, project: Project, prepared: PreparedMedia, **provenance) -> Asset | None:
         """Main-thread step: add the prepared media to the project."""
         if self._projects.current is not project or project.root is None:
             if prepared.copied and prepared.stored_path and project.root:
@@ -109,7 +113,7 @@ class MediaService:
                 (project.root / prepared.stored_path).unlink(missing_ok=True)
             self._bus.publish(Topics.STATUS, message=f"“{prepared.source.name}” is already in the project.")
             return existing
-        asset = build_asset(project.assets.new_id(), prepared)
+        asset = build_asset(project.assets.new_id(), prepared, **provenance)
         self._apply(AddAssetCommand(project, asset))
         log_event(_log, "media.imported", asset_id=asset.id, name=asset.name, type=asset.type.value)
         self.ensure_thumbnail(asset)

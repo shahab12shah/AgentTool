@@ -23,6 +23,15 @@ from app.project.project_schema import (
     migrate_document,
     validate_document,
 )
+from app.research.models import (
+    Candidate,
+    CandidateScore,
+    ResearchQuery,
+    ResearchSession,
+    ResearchSettings,
+    SceneResearchState,
+    VisualAssignment,
+)
 from app.storage.paths import ProjectPaths
 from app.transcription.alignment import ScriptAlignment
 from app.transcription.models import TranscriptionState
@@ -54,6 +63,15 @@ class Project:
     scene_analysis: SceneAnalysisState = field(default_factory=SceneAnalysisState)
     visual_intents: dict[str, VisualIntent] = field(default_factory=dict)
     visual_preferences: VisualPreferences = field(default_factory=VisualPreferences)
+    # Phase 3: visual research
+    research_settings: ResearchSettings = field(default_factory=ResearchSettings)
+    research_queries: dict[str, ResearchQuery] = field(default_factory=dict)
+    research_sessions: list[ResearchSession] = field(default_factory=list)
+    visual_candidates: dict[str, Candidate] = field(default_factory=dict)
+    candidate_scores: dict[str, CandidateScore] = field(default_factory=dict)
+    visual_assignments: dict[str, VisualAssignment] = field(default_factory=dict)
+    source_metadata: dict[str, Any] = field(default_factory=dict)
+    research_status: dict[str, SceneResearchState] = field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION
     application_version: str = APP_VERSION
     # Runtime-only state (never serialised):
@@ -77,6 +95,28 @@ class Project:
         if self.root is None:
             raise RuntimeError("Project has no location yet.")
         return ProjectPaths(self.root)
+
+    def prune_research(self, keep_scene_ids: set[str]) -> dict:
+        """Drop research data for scenes that no longer exist; returns what was removed (for undo)."""
+        removed: dict = {"candidates": {}, "scores": {}, "status": {}, "assignments": {}}
+        for cid, c in list(self.visual_candidates.items()):
+            if c.scene_id not in keep_scene_ids:
+                removed["candidates"][cid] = self.visual_candidates.pop(cid)
+                if cid in self.candidate_scores:
+                    removed["scores"][cid] = self.candidate_scores.pop(cid)
+        for sid in list(self.research_status):
+            if sid not in keep_scene_ids:
+                removed["status"][sid] = self.research_status.pop(sid)
+        for sid in list(self.visual_assignments):
+            if sid not in keep_scene_ids:
+                removed["assignments"][sid] = self.visual_assignments.pop(sid)
+        return removed
+
+    def restore_research(self, removed: dict) -> None:
+        self.visual_candidates.update(removed["candidates"])
+        self.candidate_scores.update(removed["scores"])
+        self.research_status.update(removed["status"])
+        self.visual_assignments.update(removed["assignments"])
 
     def asset_path(self, asset: Asset) -> Path:
         return self.paths.resolve(asset.path)
@@ -127,6 +167,11 @@ class Project:
         for sid in self.visual_intents:
             if sid not in scene_ids:
                 problems.append(f"visual intent for unknown scene {sid}")
+        for sid, a in self.visual_assignments.items():
+            if a.asset_id is not None and a.asset_id not in self.assets:
+                problems.append(f"visual assignment for {sid} references unknown asset {a.asset_id}")
+            if a.candidate_id is not None and a.candidate_id not in self.visual_candidates:
+                problems.append(f"visual assignment for {sid} references unknown candidate {a.candidate_id}")
         vo = self.voice_over.asset_id
         if vo is not None:
             asset = self.assets.get(vo)
@@ -162,6 +207,14 @@ class Project:
             "scene_analysis": to_plain(self.scene_analysis),
             "visual_intents": {k: v.to_dict() for k, v in self.visual_intents.items()},
             "visual_preferences": self.visual_preferences.to_dict(),
+            "research_settings": to_plain(self.research_settings),
+            "research_queries": to_plain(self.research_queries),
+            "research_sessions": to_plain(self.research_sessions),
+            "visual_candidates": {k: v.to_dict() for k, v in self.visual_candidates.items()},
+            "candidate_scores": to_plain(self.candidate_scores),
+            "visual_assignments": {k: v.to_dict() for k, v in self.visual_assignments.items()},
+            "source_metadata": to_plain(self.source_metadata),
+            "research_status": to_plain(self.research_status),
             "counters": {"asset": self.assets.counter},
         }
 
@@ -185,6 +238,14 @@ class Project:
                 scene_analysis=from_plain(SceneAnalysisState, doc["scene_analysis"]) if doc["scene_analysis"] else SceneAnalysisState(),
                 visual_intents={k: VisualIntent.from_dict(v) for k, v in doc["visual_intents"].items()},
                 visual_preferences=VisualPreferences.from_dict(doc["visual_preferences"]),
+                research_settings=from_plain(ResearchSettings, doc["research_settings"]) if doc["research_settings"] else ResearchSettings(),
+                research_queries={k: from_plain(ResearchQuery, v) for k, v in doc["research_queries"].items()},
+                research_sessions=[from_plain(ResearchSession, v) for v in doc["research_sessions"]],
+                visual_candidates={k: Candidate.from_dict(v) for k, v in doc["visual_candidates"].items()},
+                candidate_scores={k: from_plain(CandidateScore, v) for k, v in doc["candidate_scores"].items()},
+                visual_assignments={k: VisualAssignment.from_dict(v) for k, v in doc["visual_assignments"].items()},
+                source_metadata=dict(doc["source_metadata"]),
+                research_status={k: from_plain(SceneResearchState, v) for k, v in doc["research_status"].items()},
                 assets=AssetRegistry(
                     [Asset.from_dict(a) for a in doc["assets"]], counter=int((doc.get("counters") or {}).get("asset", 0))
                 ),

@@ -161,16 +161,23 @@ class MediaImporter:
             raise
 
 
-def build_asset(asset_id: str, prepared: PreparedMedia) -> Asset:
-    """Create the ``Asset`` record for prepared media (call on the main thread)."""
+def build_asset(asset_id: str, prepared: PreparedMedia, *, source_type: SourceType = SourceType.USER_MEDIA,
+                name: str | None = None, source_url: str | None = None, extra: dict | None = None) -> Asset:
+    """Create the ``Asset`` record for prepared media (call on the main thread).
+
+    Researched media passes its ``source_type``/``source_url``/``extra`` (candidate id, provider-stated licence...)
+    so the project keeps the provenance of every acquired visual.
+    """
     info = prepared.info
     assert info is not None and prepared.stored_path is not None
     return Asset(
         id=asset_id,
         type=prepared.asset_type,
-        source_type=SourceType.USER_MEDIA,
+        source_type=source_type,
         path=prepared.stored_path,
-        name=prepared.source.name,
+        name=name or prepared.source.name,
+        source_url=source_url,
+        extra=dict(extra or {}),
         duration=info.duration,
         width=info.width,
         height=info.height,

@@ -93,7 +93,7 @@ def test_rapid_preference_edits_merge_into_one_undo_step(project_ws):
     assert ws.project.visual_preferences.min_accuracy_score == 85
 
 
-def test_visual_research_is_an_interface_only_in_phase_2(project_ws):
+def test_unavailable_research_service_stub_still_fails_loudly():  # kept for hosts that run without providers
     svc = UnavailableResearchService()
     scene = Scene("scene_001", "1", 0, 1)
     intent = VisualIntent("scene_001", VisualType.PROCESS)
@@ -101,4 +101,3 @@ def test_visual_research_is_an_interface_only_in_phase_2(project_ws):
         svc.search_scene(scene, intent, VisualPreferences())
     with pytest.raises(NotAvailableInPhase):
         svc.search_candidates(scene, intent, SourceKind.YOUTUBE)
-    assert isinstance(project_ws.research, UnavailableResearchService)

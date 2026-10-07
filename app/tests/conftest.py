@@ -89,3 +89,26 @@ def voice_ws(project_ws, tmp_path):
     ws.set_script(NARRATION)
     ws.provider = provider
     return ws
+
+
+def pipeline_ws(ws, tmp_path, narration: str, threshold: float = 0.6, min_scene: float = 2.0):
+    """Project -> voice-over -> transcript -> scenes for ``narration`` (test provider; real audio file)."""
+    from app.analysis.segmenter import SegmentationParams
+    from app.tests.helpers import ScriptedProvider, make_audio, run_scenes, run_transcription
+
+    ws.new_project("Research", tmp_path / "projects")
+    provider = ScriptedProvider(narration)
+    ws.media.import_voice_over(make_audio(tmp_path / "vo.wav", provider.words[-1].end + 1.0))
+    assert ws.jobs.wait_idle(30)
+    ws.set_script(narration)
+    run_transcription(ws, provider)
+    run_scenes(ws, params=SegmentationParams(threshold=threshold, min_scene_seconds=min_scene))
+    return ws
+
+
+@pytest.fixture
+def research_ws(ws, tmp_path):
+    """A workspace with the standard 16-topic narration analysed into scenes (Phase 2 pipeline, for real)."""
+    from app.tests.helpers import NARRATION
+
+    return pipeline_ws(ws, tmp_path, NARRATION)

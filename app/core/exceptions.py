@@ -93,3 +93,19 @@ class UserEditsPresentError(AppError):
     def __init__(self, user_message: str, scene_labels: list[str]) -> None:
         super().__init__(user_message)
         self.scene_labels = scene_labels
+
+
+class ProviderError(AppError):
+    """A research source failed (network, quota, bad response...). Other providers still run."""
+
+    def __init__(self, user_message: str, *, details: str | None = None, retryable: bool = False) -> None:
+        super().__init__(user_message, details=details)
+        self.retryable = retryable
+
+
+class AcquisitionError(AppError):
+    """A chosen candidate could not be turned into a project asset."""
+
+
+class ResearchError(AppError):
+    """Visual research could not run."""

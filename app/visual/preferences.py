@@ -44,6 +44,7 @@ DEFAULT_TARGETS = {
 class SourceSetting:
     enabled: bool = True
     target_percent: float = 0.0
+    priority: int = 3  # 1 (low) .. 5 (high): a soft nudge used by visual research ranking
 
 
 def _default_sources() -> dict[str, SourceSetting]:
@@ -80,6 +81,7 @@ class VisualPreferences:
         for k in SourceKind:
             s = out.setting(k)
             s.target_percent = max(0.0, min(1000.0, float(s.target_percent)))
+            s.priority = int(max(1, min(5, s.priority)))
         out.min_accuracy_score = int(max(0, min(100, out.min_accuracy_score)))
         return out
 

@@ -92,3 +92,193 @@ def run_scenes(ws, **kw):
     job = ws.scenes.analyze(**kw)
     assert ws.jobs.wait_idle(60)
     return job
+
+
+# ====================================================================== Phase 3 research test doubles
+import json as _json
+import threading as _threading
+import time as _time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from app.core.exceptions import ProviderError
+from app.media.asset import SourceType
+from app.research.models import Acquisition, Candidate, ResearchQuery
+from app.research.providers.base import SearchContext, SourceProvider, blank_candidate
+
+
+class FakeProvider(SourceProvider):
+    """Deterministic provider for tests (NOT a real source). Serves a fixed catalogue and can fail on demand."""
+
+    name = "fake"
+    label = "Fake provider (tests)"
+
+    def __init__(self, items=None, source_types=(SourceType.STOCK_VIDEO, SourceType.STOCK_IMAGE), name="fake",
+                 fail: str | None = None, fail_if=None, available=(True, ""), delay: float = 0.0, **kw):
+        super().__init__(**kw)
+        self.name = name
+        self.source_types = tuple(source_types)
+        self.items = list(items or [])
+        self.fail, self.fail_if = fail, fail_if
+        self.available = available
+        self.delay = delay
+        self.calls: list[str] = []
+        self.active = 0
+        self.max_active = 0
+        self._lock = _threading.Lock()
+
+    def is_available(self):
+        return self.available
+
+    def config_key(self):
+        return f"fake:{self.name}:{len(self.items)}"
+
+    def search(self, query: ResearchQuery, source_type: SourceType, limit: int, ctx: SearchContext):
+        with self._lock:
+            self.calls.append(query.text)
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            if self.delay:
+                _time.sleep(self.delay)
+            if self.fail or (self.fail_if and self.fail_if(query)):
+                raise ProviderError(self.fail or "provider failed for this query")
+            out = []
+            for spec in self.items:
+                if spec.get("source_type", self.source_types[0]) != source_type:
+                    continue
+                c = blank_candidate(query, source_type, spec.get("kind", "VIDEO" if source_type in (SourceType.STOCK_VIDEO, SourceType.YOUTUBE, SourceType.WEB_VIDEO) else "IMAGE"), self.name)
+                c.title, c.description = spec["title"], spec.get("description", "")
+                c.tags = list(spec.get("tags", []))
+                c.duration, c.width, c.height = spec.get("duration", 8.0 if c.kind == "VIDEO" else None), spec.get("width", 1920), spec.get("height", 1080)
+                c.provider_id = spec.get("id", spec["title"])
+                c.source_reference = spec.get("url", f"https://example.test/{c.provider_id.replace(' ', '-')}")
+                c.media_url = spec.get("media_url", "")
+                c.local_path = spec.get("local_path", "")
+                c.thumbnail_path = spec.get("thumbnail_path", "")
+                c.acquisition = spec.get("acquisition", Acquisition.REFERENCE_ONLY)
+                if "evidence_kind" in spec:
+                    c.evidence_kind = spec["evidence_kind"]
+                out.append(c)
+            return out[:limit]
+        finally:
+            with self._lock:
+                self.active -= 1
+
+    def fetch_thumbnail(self, candidate, dest, http):
+        return False
+
+    def acquire(self, candidate, dest_dir, ctx):
+        from app.core.exceptions import AcquisitionError
+
+        if candidate.local_path and Path(candidate.local_path).is_file():
+            return Path(candidate.local_path)
+        raise AcquisitionError("fake provider has no file")
+
+
+class MockWeb:
+    """A local HTTP server standing in for remote APIs. Routes map a path prefix to a callable(handler, body)->(status, type, bytes)."""
+
+    def __init__(self):
+        self.routes: dict[str, object] = {}
+        self.requests: list[dict] = []
+        handler = self._make_handler()
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+        _threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def _make_handler(self):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def _serve(self, body=b""):
+                outer.requests.append({"path": self.path, "headers": dict(self.headers), "method": self.command, "body": body})
+                for prefix, fn in sorted(outer.routes.items(), key=lambda kv: -len(kv[0])):
+                    if self.path.split("?")[0].startswith(prefix):
+                        status, ctype, payload = fn(self, body)
+                        self.send_response(status)
+                        self.send_header("Content-Type", ctype)
+                        self.send_header("Content-Length", str(len(payload)))
+                        self.end_headers()
+                        self.wfile.write(payload)
+                        return
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_GET(self):
+                self._serve()
+
+            def do_POST(self):
+                self._serve(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+
+            def log_message(self, *a):
+                pass
+
+        return H
+
+    def json(self, prefix: str, payload, status: int = 200):
+        data = _json.dumps(payload).encode()
+        self.routes[prefix] = lambda h, b: (status, "application/json", data)
+
+    def file(self, prefix: str, path: Path, ctype: str = "application/octet-stream"):
+        data = Path(path).read_bytes()
+        self.routes[prefix] = lambda h, b: (200, ctype, data)
+
+    def html(self, prefix: str, html: str):
+        self.routes[prefix] = lambda h, b: (200, "text/html", html.encode())
+
+    def count(self, prefix: str) -> int:
+        return sum(1 for r in self.requests if r["path"].startswith(prefix))
+
+    def close(self):
+        self.server.shutdown()
+
+
+def allow_local_http(ws) -> None:
+    """Providers refuse private hosts by default; tests talk to 127.0.0.1 so opt in explicitly."""
+    for p in ws.research.registry.all():
+        p.http.allow_private = True
+        if hasattr(p, "allow_private"):
+            p.allow_private = True
+
+
+def make_image(path: Path, kind: str = "testsrc", size: str = "320x180") -> Path:
+    import subprocess
+
+    src = {"testsrc": "testsrc=size={s}", "testsrc2": "testsrc2=size={s}", "red": "color=c=red:size={s}", "mandel": "mandelbrot=size={s}",
+           "gradient": "gradients=size={s}:seed=7"}[kind].format(s=size)
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", src, "-frames:v", "1", str(path)], check=True)
+    return path
+
+
+def make_video(path: Path, seconds: float = 4.0, kind: str = "testsrc") -> Path:
+    import subprocess
+
+    src = {"testsrc": "testsrc=size=640x360:rate=24", "testsrc2": "testsrc2=size=640x360:rate=24", "mandel": "mandelbrot=size=640x360:rate=24"}[kind]
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", f"{src}:duration={seconds}", "-pix_fmt", "yuv420p", str(path)], check=True)
+    return path
+
+
+def solar_brief(**kw):
+    from app.research.models import EvidenceLevel, ResearchBrief
+
+    base = dict(scene_id="scene_014", topic="Solar silver demand", primary_subject="solar installations", secondary_subject="silver",
+                action="manufacturing", context="solar energy industry", visual_type="PROCESS", narration="Silver demand from solar installations continues to rise.",
+                entities=["silver", "solar panels"], entity_types={"silver": "FINANCIAL_INSTRUMENT", "solar panels": "TECHNOLOGY"},
+                claims=["Solar installations are increasing silver demand."], claim_types=["FACT"], evidence_level=EvidenceLevel.POSSIBLE,
+                preferred_sources=["STOCK_VIDEO", "WEB_IMAGE", "SCREENSHOT", "AI_GENERATED"], avoid=["Generic silver coins unrelated to solar"],
+                avoid_terms=["coin", "coins", "bullion", "jewelry"], video_topic="Silver", scene_start=74.2, scene_end=80.4)
+    base.update(kw)
+    return ResearchBrief(**base)
+
+
+def cand(title, description="", source_type=SourceType.STOCK_VIDEO, kind=None, tags=(), duration=8.0, width=1920, height=1080, scene_id="scene_014",
+         cid=None, **kw):
+    c = Candidate(candidate_id=cid or f"candidate_{abs(hash((title, source_type.value))) % 99999:05d}", scene_id=scene_id, source_type=source_type,
+                  kind=kind or ("VIDEO" if source_type in (SourceType.STOCK_VIDEO, SourceType.YOUTUBE, SourceType.WEB_VIDEO) else "IMAGE"),
+                  title=title, description=description, tags=list(tags), width=width, height=height, provider="fake",
+                  duration=duration if (kind or "VIDEO") == "VIDEO" and source_type in (SourceType.STOCK_VIDEO, SourceType.YOUTUBE, SourceType.WEB_VIDEO) else None,
+                  provider_id=title)
+    for k, v in kw.items():
+        setattr(c, k, v)
+    return c

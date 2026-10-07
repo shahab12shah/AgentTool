@@ -78,15 +78,18 @@ class SetScenesCommand(Command):
         self.project, self.scenes, self.intents, self.state = project, scenes, intents, state
         self.description = description
         self._old: tuple | None = None
+        self._pruned: dict = {}
 
     def do(self) -> None:
         p = self.project
         self._old = (p.scenes, p.visual_intents, p.scene_analysis)
         p.scenes, p.visual_intents, p.scene_analysis = deepcopy(self.scenes), deepcopy(self.intents), self.state
+        self._pruned = p.prune_research({s.id for s in p.scenes})  # research belongs to scenes that still exist
 
     def undo(self) -> None:
         assert self._old is not None
         self.project.scenes, self.project.visual_intents, self.project.scene_analysis = self._old
+        self.project.restore_research(self._pruned)
 
 
 class ReplaceScenesCommand(Command):
@@ -102,6 +105,7 @@ class ReplaceScenesCommand(Command):
         self._index = -1
         self._old_scenes: list[Scene] = []
         self._old_intents: dict[str, VisualIntent | None] = {}
+        self._pruned = None
 
     def do(self) -> None:
         p = self.project
@@ -119,6 +123,8 @@ class ReplaceScenesCommand(Command):
         for sid in self.old_ids:
             p.visual_intents.pop(sid, None)
         p.visual_intents.update(deepcopy(self.new_intents))
+        gone = set(self.old_ids) - {s.id for s in self.new_scenes}
+        self._pruned = p.prune_research({s.id for s in p.scenes} | ({x for x in p.research_status} - gone)) if gone else None
 
     def undo(self) -> None:
         p = self.project
@@ -129,6 +135,8 @@ class ReplaceScenesCommand(Command):
         for sid, intent in self._old_intents.items():
             if intent is not None:
                 p.visual_intents[sid] = intent
+        if self._pruned:
+            p.restore_research(self._pruned)
 
 
 class SetVisualPreferencesCommand(Command):

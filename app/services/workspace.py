@@ -35,7 +35,8 @@ from app.services.scene_service import SceneService
 from app.services.timeline_service import TimelineService
 from app.services.transcript_service import TranscriptService
 from app.visual.preferences import VisualPreferences
-from app.visual.research import UnavailableResearchService, VisualResearchService
+from app.visual.research import VisualResearchService
+from app.services.research_service import ResearchService
 from app.project.phase2_commands import SetVisualPreferencesCommand
 from app.storage.paths import AppPaths
 
@@ -69,7 +70,8 @@ class Workspace:
         self.timeline = TimelineService(self.projects, self.commands)
         self.transcripts = TranscriptService(self.projects, self.jobs, self.bus, self.apply_command, lambda: self.settings)
         self.scenes = SceneService(self.projects, self.commands, self.jobs, self.bus)
-        self.research: VisualResearchService = UnavailableResearchService()  # Phase 3
+        self.research: ResearchService = ResearchService(self.projects, self.commands, self.jobs, self.bus, self.apply_command,
+                                                         self.media, self.importer, lambda: self.settings)
         self.selected_clip_id: str | None = None
 
         self.bus.subscribe(Topics.PROJECT_CHANGED, self._on_project_changed)
@@ -226,7 +228,7 @@ class Workspace:
         settings = settings.sanitized()
         self.settings_store.save(settings)
         self.settings = settings
-        self.prober.configure(settings.ffprobe_path)
+        self.prober.configure(settings.ffprobe_path)  # providers read settings lazily through getters
         self.thumbnails.configure(settings.ffmpeg_path)
         self.renderer = FFmpegRenderer(settings.ffmpeg_path)
         self.bus.publish(Topics.STATUS, message="Settings saved")

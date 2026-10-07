@@ -144,6 +144,17 @@ def migrate_document(doc: dict[str, Any]) -> dict[str, Any]:
         doc.setdefault("visual_preferences", {})
         doc["scenes"] = []  # Phase 1 never produced scenes; the Scene shape changed
         doc["schema_version"] = 2
+        version = 2
+    if version == 2:  # Phase 2 -> Phase 3: purely additive sections
+        doc.setdefault("research_settings", {})
+        doc.setdefault("research_queries", {})
+        doc.setdefault("research_sessions", [])
+        doc.setdefault("visual_candidates", {})
+        doc.setdefault("candidate_scores", {})
+        doc.setdefault("visual_assignments", {})
+        doc.setdefault("source_metadata", {})
+        doc.setdefault("research_status", {})
+        doc["schema_version"] = 3
     return doc
 
 
@@ -166,6 +177,16 @@ _V2_SECTIONS: dict[str, type] = {
     "visual_intents": dict,
     "visual_preferences": dict,
 }
+_V3_SECTIONS: dict[str, type] = {
+    "research_settings": dict,
+    "research_queries": dict,
+    "research_sessions": list,
+    "visual_candidates": dict,
+    "candidate_scores": dict,
+    "visual_assignments": dict,
+    "source_metadata": dict,
+    "research_status": dict,
+}
 
 
 def validate_document(doc: Any) -> None:
@@ -183,7 +204,7 @@ def validate_document(doc: Any) -> None:
         )
     elif version < 1:
         problems.append(f"unsupported schema_version {version}")
-    for key, typ in {**_REQUIRED_SECTIONS, **(_V2_SECTIONS if isinstance(version, int) and version >= 2 else {})}.items():
+    for key, typ in {**_REQUIRED_SECTIONS, **(_V2_SECTIONS if isinstance(version, int) and version >= 2 else {}), **(_V3_SECTIONS if isinstance(version, int) and version >= 3 else {})}.items():
         if key not in doc:
             problems.append(f"missing section '{key}'")
         elif not isinstance(doc[key], typ):
