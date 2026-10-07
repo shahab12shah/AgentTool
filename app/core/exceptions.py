@@ -69,3 +69,27 @@ class JobCancelled(Exception):
 
 class NotAvailableInPhase(AppError):
     """A feature that is intentionally not implemented yet."""
+
+
+class TranscriptionError(AppError):
+    """Transcription provider failed or is unavailable."""
+
+
+class InvalidTranscriptError(AppError):
+    """Transcript data violates timing/structure rules."""
+
+
+class AnalysisError(AppError):
+    """Scene analysis failed."""
+
+
+class SceneEditError(AppError):
+    """A manual scene edit (split/merge/edit) was rejected."""
+
+
+class UserEditsPresentError(AppError):
+    """Regeneration would overwrite scenes the user edited or approved."""
+
+    def __init__(self, user_message: str, scene_labels: list[str]) -> None:
+        super().__init__(user_message)
+        self.scene_labels = scene_labels

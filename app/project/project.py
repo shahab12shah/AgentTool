@@ -12,17 +12,21 @@ from app.core.constants import APP_VERSION, SCHEMA_VERSION, TIME_EPSILON
 from app.core.exceptions import InvalidProjectError
 from app.media.asset import Asset, AssetType
 from app.media.asset_registry import AssetRegistry
+from app.analysis.models import Scene, SceneAnalysisState, VisualIntent
+from app.core.serialization import from_plain, to_plain
 from app.project.project_schema import (
     AIDecision,
     ProjectSettings,
     RenderSettings,
-    Scene,
     ScriptData,
     VoiceOverData,
     migrate_document,
     validate_document,
 )
 from app.storage.paths import ProjectPaths
+from app.transcription.alignment import ScriptAlignment
+from app.transcription.models import TranscriptionState
+from app.visual.preferences import VisualPreferences
 from app.timeline.timeline import Timeline
 
 
@@ -44,6 +48,12 @@ class Project:
     timeline: Timeline = field(default_factory=Timeline.default)
     render_settings: RenderSettings = field(default_factory=RenderSettings)
     ai_decisions: list[AIDecision] = field(default_factory=list)
+    # Phase 2
+    transcription: TranscriptionState = field(default_factory=TranscriptionState)
+    script_alignment: ScriptAlignment | None = None
+    scene_analysis: SceneAnalysisState = field(default_factory=SceneAnalysisState)
+    visual_intents: dict[str, VisualIntent] = field(default_factory=dict)
+    visual_preferences: VisualPreferences = field(default_factory=VisualPreferences)
     schema_version: int = SCHEMA_VERSION
     application_version: str = APP_VERSION
     # Runtime-only state (never serialised):
@@ -103,6 +113,20 @@ class Project:
                 if c.timeline_start < last_end - TIME_EPSILON:
                     problems.append(f"clip {c.id} overlaps the previous clip on {t.name}")
                 last_end = max(last_end, c.timeline_end)
+        scene_ids: set[str] = set()
+        prev_end = 0.0
+        for sc in self.scenes:
+            if sc.id in scene_ids:
+                problems.append(f"duplicate scene id {sc.id}")
+            scene_ids.add(sc.id)
+            if sc.end <= sc.start or sc.start < -TIME_EPSILON:
+                problems.append(f"scene {sc.label} has an invalid time range")
+            if sc.start < prev_end - 1e-6:
+                problems.append(f"scene {sc.label} overlaps the previous scene")
+            prev_end = max(prev_end, sc.end)
+        for sid in self.visual_intents:
+            if sid not in scene_ids:
+                problems.append(f"visual intent for unknown scene {sid}")
         vo = self.voice_over.asset_id
         if vo is not None:
             asset = self.assets.get(vo)
@@ -133,6 +157,11 @@ class Project:
             "timeline": self.timeline.to_dict(),
             "render_settings": self.render_settings.to_dict(),
             "ai_decisions": [d.to_dict() for d in self.ai_decisions],
+            "transcription": to_plain(self.transcription),
+            "script_alignment": self.script_alignment.to_dict() if self.script_alignment else {},
+            "scene_analysis": to_plain(self.scene_analysis),
+            "visual_intents": {k: v.to_dict() for k, v in self.visual_intents.items()},
+            "visual_preferences": self.visual_preferences.to_dict(),
             "counters": {"asset": self.assets.counter},
         }
 
@@ -151,6 +180,11 @@ class Project:
                 script=ScriptData.from_dict(doc["script"]),
                 voice_over=VoiceOverData.from_dict(doc["voice_over"]),
                 scenes=[Scene.from_dict(s) for s in doc["scenes"]],
+                transcription=from_plain(TranscriptionState, doc["transcription"]) if doc["transcription"] else TranscriptionState(),
+                script_alignment=ScriptAlignment.from_dict(doc["script_alignment"]) if doc["script_alignment"] else None,
+                scene_analysis=from_plain(SceneAnalysisState, doc["scene_analysis"]) if doc["scene_analysis"] else SceneAnalysisState(),
+                visual_intents={k: VisualIntent.from_dict(v) for k, v in doc["visual_intents"].items()},
+                visual_preferences=VisualPreferences.from_dict(doc["visual_preferences"]),
                 assets=AssetRegistry(
                     [Asset.from_dict(a) for a in doc["assets"]], counter=int((doc.get("counters") or {}).get("asset", 0))
                 ),

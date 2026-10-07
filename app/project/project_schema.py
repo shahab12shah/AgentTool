@@ -66,32 +66,6 @@ class VoiceOverData:
 
 
 @dataclass
-class Scene:
-    """Semantic scene (produced by Phase 2 script analysis)."""
-
-    id: str
-    index: int
-    script_text: str = ""
-    start: float | None = None
-    end: float | None = None
-    visual_intent: dict[str, Any] | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "index": self.index,
-            "script_text": self.script_text,
-            "start": self.start,
-            "end": self.end,
-            "visual_intent": self.visual_intent,
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Scene":
-        return cls(d["id"], int(d["index"]), d.get("script_text", ""), d.get("start"), d.get("end"), d.get("visual_intent"))
-
-
-@dataclass
 class RenderSettings:
     container: str = "mp4"
     video_codec: str = "h264"
@@ -154,13 +128,22 @@ class AIDecision:
 
 # ----------------------------------------------------------------- migration
 def migrate_document(doc: dict[str, Any]) -> dict[str, Any]:
-    """Upgrade an older document to the current schema (no migrations needed yet)."""
+    """Upgrade an older document to the current schema. Returns a new dict; the input is untouched."""
     version = doc.get("schema_version")
     if isinstance(version, int) and version > SCHEMA_VERSION:
         raise InvalidProjectError(
             f"This project was created by a newer version of the application (schema {version}). "
             "Please update the application to open it."
         )
+    doc = dict(doc)
+    if version == 1:  # Phase 1 -> Phase 2: purely additive sections
+        doc.setdefault("transcription", {})
+        doc.setdefault("script_alignment", {})
+        doc.setdefault("scene_analysis", {})
+        doc.setdefault("visual_intents", {})
+        doc.setdefault("visual_preferences", {})
+        doc["scenes"] = []  # Phase 1 never produced scenes; the Scene shape changed
+        doc["schema_version"] = 2
     return doc
 
 
@@ -175,6 +158,13 @@ _REQUIRED_SECTIONS: dict[str, type] = {
     "timeline": dict,
     "render_settings": dict,
     "ai_decisions": list,
+}
+_V2_SECTIONS: dict[str, type] = {
+    "transcription": dict,
+    "script_alignment": dict,
+    "scene_analysis": dict,
+    "visual_intents": dict,
+    "visual_preferences": dict,
 }
 
 
@@ -193,7 +183,7 @@ def validate_document(doc: Any) -> None:
         )
     elif version < 1:
         problems.append(f"unsupported schema_version {version}")
-    for key, typ in _REQUIRED_SECTIONS.items():
+    for key, typ in {**_REQUIRED_SECTIONS, **(_V2_SECTIONS if isinstance(version, int) and version >= 2 else {})}.items():
         if key not in doc:
             problems.append(f"missing section '{key}'")
         elif not isinstance(doc[key], typ):

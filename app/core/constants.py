@@ -4,7 +4,7 @@ from __future__ import annotations
 
 APP_NAME = "AgentTool"
 APP_VERSION = "0.1.0"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2 = Phase 2: transcription, alignment, scenes, visual intents, preferences
 
 PROJECT_FILE = "project.json"
 PROJECT_BACKUP_SUFFIX = ".bak"

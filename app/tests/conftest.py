@@ -73,3 +73,19 @@ def import_and_wait(ws: Workspace, path: Path):
     assert jobs[0].error is None, jobs[0].error
     assert got, "asset was not registered"
     return got[0]
+
+
+@pytest.fixture
+def voice_ws(project_ws, tmp_path):
+    """Project with a real WAV imported as the voice-over and the narration set as the script."""
+    from app.tests.helpers import NARRATION, ScriptedProvider, make_audio
+
+    ws = project_ws
+    provider = ScriptedProvider(NARRATION)
+    audio = make_audio(tmp_path / "narration.wav", provider.words[-1].end + 1.0)
+    ws.media.import_voice_over(audio)
+    assert ws.jobs.wait_idle(30)
+    assert ws.project.voice_over.asset_id
+    ws.set_script(NARRATION)
+    ws.provider = provider
+    return ws

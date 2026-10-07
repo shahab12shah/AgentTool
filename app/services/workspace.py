@@ -31,7 +31,12 @@ from app.project.project_schema import ProjectSettings
 from app.project.recovery import RecoveryEntry, RecoveryManager
 from app.rendering.renderer import FFmpegRenderer, Renderer
 from app.services.media_service import MediaService
+from app.services.scene_service import SceneService
 from app.services.timeline_service import TimelineService
+from app.services.transcript_service import TranscriptService
+from app.visual.preferences import VisualPreferences
+from app.visual.research import UnavailableResearchService, VisualResearchService
+from app.project.phase2_commands import SetVisualPreferencesCommand
 from app.storage.paths import AppPaths
 
 _log = get_logger(__name__)
@@ -62,6 +67,9 @@ class Workspace:
             self.projects, self.commands, self.jobs, self.importer, self.thumbnails, self.bus, self.apply_command
         )
         self.timeline = TimelineService(self.projects, self.commands)
+        self.transcripts = TranscriptService(self.projects, self.jobs, self.bus, self.apply_command, lambda: self.settings)
+        self.scenes = SceneService(self.projects, self.commands, self.jobs, self.bus)
+        self.research: VisualResearchService = UnavailableResearchService()  # Phase 3
         self.selected_clip_id: str | None = None
 
         self.bus.subscribe(Topics.PROJECT_CHANGED, self._on_project_changed)
@@ -187,6 +195,10 @@ class Workspace:
         project = self.require_project()
         if text != project.script.text:
             self.commands.execute(SetScriptCommand(project, text))
+
+    # ------------------------------------------------------------ visual preferences
+    def set_visual_preferences(self, prefs: VisualPreferences) -> None:
+        self.commands.execute(SetVisualPreferencesCommand(self.require_project(), prefs))
 
     # ------------------------------------------------------------ autosave & recovery
     def autosave_tick(self) -> bool:

@@ -23,6 +23,13 @@ class Settings:
     theme: str = "dark"
     ffmpeg_path: str = ""  # empty = discover on PATH
     ffprobe_path: str = ""
+    # Phase 2: transcription (API keys are never stored here; only the *name* of the environment variable)
+    transcription_provider: str = "auto"  # auto | faster-whisper | api | pocketsphinx
+    transcription_language: str = "en"  # empty = let the provider detect
+    whisper_model: str = ""  # faster-whisper model size/name or local folder
+    api_base_url: str = ""  # OpenAI-compatible endpoint, e.g. https://api.openai.com/v1
+    api_model: str = "whisper-1"
+    api_key_env: str = "OPENAI_API_KEY"
 
     def sanitized(self) -> "Settings":
         """Return a copy with out-of-range values replaced by safe ones."""
@@ -32,9 +39,12 @@ class Settings:
         s.autosave_interval_seconds = max(MIN_AUTOSAVE_SECONDS, s.autosave_interval_seconds)
         if s.theme not in THEMES:
             s.theme = "dark"
-        for name in ("default_project_location", "ffmpeg_path", "ffprobe_path"):
+        for name in ("default_project_location", "ffmpeg_path", "ffprobe_path", "transcription_language", "whisper_model",
+                     "api_base_url", "api_model", "api_key_env"):
             if not isinstance(getattr(s, name), str):
                 setattr(s, name, getattr(Settings(), name))
+        if s.transcription_provider not in ("auto", "faster-whisper", "api", "pocketsphinx"):
+            s.transcription_provider = "auto"
         s.use_proxies = bool(s.use_proxies)
         return s
 

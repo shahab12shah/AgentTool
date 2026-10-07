@@ -1,2 +1,3 @@
 PySide6>=6.6
+pocketsphinx>=5.0
 pytest>=8.0
