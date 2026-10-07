@@ -169,7 +169,9 @@ def test_nonfinite_time_value_is_critical(tmp_path):
 
 def test_invalid_speed_is_critical(tmp_path):
     p, _s, video, *_ = build(tmp_path)
-    add_clip(p, "track_v2", video, 4, 3, created_by="AI", speed=0.0, opacity=0.5)
+    ok = add_clip(p, "track_v2", video, 4, 3, created_by="AI", speed=1.5, opacity=0.5)
+    none_of(check(p), "timeline.clip.speed")
+    ok.speed = 0.0
     assert one(check(p), "timeline.clip.speed").severity is Severity.CRITICAL
 
 
@@ -191,17 +193,17 @@ def test_cross_track_overlap_unintended_vs_deliberate_layers(tmp_path):
     p, _s, video, clips, _v = build(tmp_path)
     broll = add_asset(p, "broll.mp4", "video", duration=12)
     staggered = add_clip(p, "track_v2", broll, 8, 4, created_by="AI")  # starts inside clip 0, ends inside clip 1: two shots fighting
-    iss = one(check(p), "timeline.overlap.cross_track")
-    assert iss.severity is Severity.ERROR and iss.timeline_item_id == staggered.id and abs(iss.duration - 2.0) < 1e-6
+    found = find(check(p), "timeline.overlap.cross_track")  # one finding per covered clip: 2 s over clip 0 and 2 s over clip 1
+    assert len(found) == 2 and {i.timeline_item_id for i in found} == {staggered.id} and all(i.severity is Severity.ERROR and abs(i.duration - 2.0) < 1e-6 for i in found)
     staggered.created_by = "USER"
-    assert one(check(p), "timeline.overlap.cross_track").severity is Severity.WARNING  # the validator's rule: the user may have meant it
+    assert {i.severity for i in find(check(p), "timeline.overlap.cross_track")} == {Severity.WARNING}  # the validator's rule: the user may have meant it
     p.timeline.get_track("track_v2").clips.clear()
     deliberate = {
         "cutaway inside the clip": dict(start=2, dur=4),
         "half transparent layer": dict(start=8, dur=4, opacity=0.5),
         "picture in picture": dict(start=8, dur=4, scale=0.4, position=(500.0, 300.0)),
         "flagged overlay": dict(start=8, dur=4, effects={"overlay": True}),
-        "cross dissolve": dict(start=9.5, dur=4, transition={"type": "DISSOLVE", "duration": 1.0}),
+        "cross dissolve": dict(start=9.5, dur=1.0, transition={"type": "DISSOLVE", "duration": 1.0}),
     }
     for name, kw in deliberate.items():
         s, d = kw.pop("start"), kw.pop("dur")
@@ -522,6 +524,7 @@ def test_invalid_animation_is_critical_even_on_user_owned_clips(tmp_path):
 def test_source_range_and_track_kind_problems_come_from_the_timeline_validator(tmp_path):
     p, _s, video, *_ = build(tmp_path)
     voice_asset = p.assets.get(p.voice_over.asset_id)
+    none_of(check(p), "timeline.clip.source_range", "timeline.clip.track_kind")  # the clean project plays inside its media on the right tracks
     bad_src = add_clip(p, "track_v2", video, 5, 3, source_in=10.0, source_out=13.0, created_by="AI", opacity=0.5)  # the media is 12 s long
     wrong = add_clip(p, "track_v3", voice_asset, 20, 2, created_by="AI", opacity=0.5)
     out = check(p)

@@ -77,6 +77,7 @@ SYLLABLE_PROMINENCE_DB = 2.5
 MAX_PAUSE_S = 5.0  # a longer speechless stretch is a passage without narration, not a pause
 MIN_PAUSE_S = 0.25
 LONG_PAUSE_S = 1.0
+PAUSE_RESOLUTION_S = 0.05  # speech edges are located to one 25 ms hop either side: a 1.0 s pause reads 0.95-1.05 s
 
 SILENCE_MIN_S = 0.25
 SILENCE_ABS_MIN_DB = -72.0
@@ -404,6 +405,7 @@ class _Run:
         self._speech()
         self._floor_and_music()
         self._silences_and_pauses()
+        self.edge_zone = self._speech_edge_zone(1.0)
         self._ducking()
         self._music_stats()
         self._sfx()
@@ -567,13 +569,16 @@ class _Run:
                 if len(ws) * STEP_S >= 1.5 and (b - a) * STEP_S >= 2.0:
                     speech_level[j] = float(np.median(lvl[ws]))
             elif len(ws) * STEP_S >= 1.0:
-                gap_level[j] = float(np.max(lvl[ws]))  # smear can only lower a gap's floor: its best step is the honest one
+                # the gap's own level: the steps away from the speech edges (the bed's real, un-ducked level; a slow swell of the bed averages out); when the gap
+                # is too short to have such steps, smear can only have lowered it, so its best step is the honest one
+                core = [w for w in ws if not self.edge_zone[w]]
+                gap_level[j] = float(np.median(lvl[core])) if len(core) >= 2 else float(np.max(lvl[ws]))
         drops, sp_time, gap_time = [], 0.0, 0.0
         for j, v in speech_level.items():
             refs = [gap_level[k] for k in (j - 1, j + 1) if k in gap_level]
             if not refs:
                 continue
-            drops.append(float(np.max(refs)) - v)  # the gap's level can only be under-read (smear, fades), so the louder neighbour is the honest reference
+            drops.append(float(np.max(refs)) - v)  # a gap's level can only be under-read (smear, fades), so the louder neighbour is the honest reference
             _, a, b = runs[j]
             sp_time += sum(1 for w in range(a, b) if m[w]) * STEP_S
             gap_time += sum(sum(1 for w in range(runs[k][1], runs[k][2]) if m[w]) for k in (j - 1, j + 1) if k in gap_level) * STEP_S
@@ -593,14 +598,24 @@ class _Run:
             return np.zeros(self.W, dtype=bool)
         return np.abs(self.w_mid[:, None] - edges[None, :]).min(axis=1) <= margin
 
+    def _duck_shaped(self, t: float, delta_db: float, margin: float = 1.0) -> bool:
+        """True when a level step ``delta_db`` at time ``t`` is what a ducker does: a fall at the start of a speech run or a rise at its end. A ducker is a
+        mixing tool, not a change of the music, so those steps are not music changes (a swell or fade that starts when the speaker stops / starts is)."""
+        s = self.spec
+        best, kind = margin + 1e-9, 0
+        for a, b in self.speech_runs:
+            for te, k in ((float(s.tc[a]), -1), (float(s.tc[b - 1]), 1)):
+                if abs(t - te) < best:
+                    best, kind = abs(t - te), k
+        return bool(kind) and delta_db * kind > 0 and best <= margin
+
     def _music_stats(self) -> None:
         W = self.W
         m = self.music
         s = self.spec
         self.music_presence = float(m.sum() / W) if W else 0.0
         lvl = self.floor_db.astype(float)
-        zone = self._speech_edge_zone(1.0)
-        self.edge_zone = zone
+        zone = self.edge_zone
         spread = 0.0
         crest = 0.0
         if m.sum() >= 4:
@@ -643,9 +658,10 @@ class _Run:
 
         for w in range(2, W - 1):
             d = step(w)
-            need = MUSIC_STEP_DB if not zone[w] else DUCK_FULL_DB  # next to speech only a step bigger than any duck counts
-            if abs(d) < need or not inside(w * STEP_S):
+            if abs(d) < MUSIC_STEP_DB or not inside(w * STEP_S):
                 continue
+            if zone[w] and self._duck_shaped(w * STEP_S, d):
+                continue  # the duck at a speech edge is mixing, not a change of the music
             if abs(d) < max(abs(step(v)) for v in range(max(2, w - 2), min(W - 1, w + 3))) - 1e-9:
                 continue  # not the sharpest point of this step
             times.append(w * STEP_S)
@@ -883,7 +899,7 @@ class _Run:
         prof.silence_percentage = round(clamp(self.silent_time / dur, 0.0, 1.0) * 100.0, 2)
         pd = [b - a for a, b in self.pauses]
         prof.average_pause_duration = round(float(np.mean(pd)), 3) if pd else 0.0
-        prof.long_pause_frequency = round(sum(1 for d in pd if d >= LONG_PAUSE_S) / minutes, 3)
+        prof.long_pause_frequency = round(sum(1 for d in pd if d >= LONG_PAUSE_S - PAUSE_RESOLUTION_S) / minutes, 3)
         prof.audio_dynamic_range = round(self.dynamic_range, 2)
         prof.loudness_changes_per_minute = round(self.loudness_changes / minutes, 3)
         series = self._series()

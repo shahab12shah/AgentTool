@@ -608,7 +608,7 @@ def test_progress_is_reported_and_cancel_is_honoured(tmp_path):
 # ------------------------------------------------------------------ scene-local contract
 def _two_scene_problems(tmp_path):
     w = World(tmp_path)
-    w.visuals(((1.7, 10.0), (10.0, 20.0)))  # scene 1: visual late
+    w.visuals(((1.7, 5.0), (5.0, 10.0), (10.0, 20.0)))  # scene 1: first visual late (two pictures, so fixing the first leaves the clip next to scene 2 untouched)
     w.caption(W_DEMAND, W_DEMAND + 4, 0.42)  # scene 2: caption drift
     return w
 
@@ -635,9 +635,9 @@ def test_scene_signature_isolates_scenes_so_only_the_changed_one_is_reanalysed(t
     st = second.run.checkers["sync"]
     assert st.reused_scenes == 1 and st.analyzed_scenes == 1
     assert sorted((i.scene_id, i.code) for i in second.run.issues) == [(w.s1.id, "sync.visual_late"), (w.s2.id, "sync.caption_drift"), (w.s2.id, "sync.caption_drift")]
-    # fixing scene 1's visual re-analyses scene 1 and keeps scene 2's findings
+    # fixing scene 1's visual re-analyses scene 1 and keeps scene 2's findings (a clip that overlaps the neighbour's +-0.5 s window would re-analyse that scene too: the signature is conservative)
     first_clip = w.p.timeline.get_track("track_v1").clips[0]
-    first_clip.timeline_start, first_clip.duration = 0.0, 10.0
+    first_clip.timeline_start, first_clip.duration = 0.0, 5.0
     third = eng.run(qc_ctx(w.p), previous=PreviousState(second.run.issues, second.cache))
     assert third.run.checkers["sync"].analyzed_scenes == 1 and sorted(i.code for i in third.run.issues) == ["sync.caption_drift", "sync.caption_drift"]
     assert sync_summary(third.run.metrics["sync"])["captions_checked"] == 2
