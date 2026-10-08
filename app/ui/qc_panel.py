@@ -779,15 +779,25 @@ class QCPanel(QWidget):
             res["r"] = self.ws.qc.apply_safe_fixes(None, code_prefix=code_prefix)
 
         if self.ctx.guard(self, go, modal=True, title="Fix all safe issues"):
-            self.status(f"Applied {len(res.get('r') or [])} safe fix(es) as one undo step. Semantic and creative changes are never applied automatically.")
+            self.status(f"Applied {len(res.get('r') or [])} safe fix(es) as one undo step. Semantic and creative changes are never applied automatically." + self._skipped_note())
             self._refresh_now()
 
     def fix_similar(self) -> None:
         i = self._require()
         if i is None:
             return
-        self.ctx.guard(self, lambda: self.ws.qc.fix_similar(i.issue_id, confirmed=not i.auto_fix_safe), modal=True, title="Fix all similar")
+        if self.ctx.guard(self, lambda: self.ws.qc.fix_similar(i.issue_id, confirmed=not i.auto_fix_safe), modal=True, title="Fix all similar"):
+            note = self._skipped_note()
+            if note:
+                self.status("Fixed the similar issues that could be fixed." + note)
         self._refresh_now()
+
+    def _skipped_note(self) -> str:
+        """What the last batch left out and why (the fix engine records one reason per skipped issue)."""
+        skipped = list(getattr(getattr(self.ws.qc, "fixes", None), "last_skipped", None) or [])
+        if not skipped:
+            return ""
+        return f" Skipped {len(skipped)}: {skipped[0].reason}" + (" (and others)" if len(skipped) > 1 else "")
 
     def ignore(self, whole_type: bool) -> None:
         i = self._require()

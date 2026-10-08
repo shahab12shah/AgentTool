@@ -335,7 +335,9 @@ class QCContext:
                 return ""
             sc = self.scene_ctx(scene_id)
             words = [[w.word_id, round(w.start, 3), round(w.end, 3), w.text] for w in self.words_between(s.start, s.end)]
-            clips = [c.to_dict() for _t, c in self.clips_in(s.start - 0.5, s.end + 0.5)]
+            near = self.clips_in(s.start - 0.5, s.end + 0.5)
+            clips = [c.to_dict() for _t, c in near]
+            flags = sorted({(t.id, t.hidden, t.muted, t.locked, t.solo, round(t.volume, 3)) for t, _c in near})  # a muted / locked / hidden track changes what the clips mean
             a = self.project.visual_assignments.get(scene_id)
             neigh = [(n.scene_id, n.topic, n.asset_id) for n in ((sc.prev, sc.next) if sc else ()) if n is not None]
             intent = self.project.visual_intents.get(scene_id)
@@ -351,7 +353,8 @@ class QCContext:
                     facts.append([aid, ast.content_hash, st.st_size, int(st.st_mtime), ast.width, ast.height, ast.duration])
                 except OSError:
                     facts.append([aid, ast.content_hash, None])
-            return sha(facts, [s.id, round(s.start, 3), round(s.end, 3), s.narration, round(s.importance, 3), s.topic, [c.text for c in s.claims], [n.text for n in s.numbers]], words, clips,
-                       (a.asset_id, a.approved, a.skipped, a.accuracy_score) if a else None, neigh, (intent.type.value, intent.primary_subject) if intent else None)
+            return sha(facts, [s.id, round(s.start, 3), round(s.end, 3), s.narration, round(s.importance, 3), s.topic, [c.text for c in s.claims], [n.text for n in s.numbers]], words, clips, flags,
+                       (a.asset_id, a.approved, a.skipped, a.accuracy_score, a.selected_by, a.candidate_id) if a else None, neigh, (intent.type.value, intent.primary_subject) if intent else None,
+                       scene_id in self.locked_scene_ids())
 
         return self.memo(f"h.scene.{scene_id}", calc)

@@ -40,6 +40,11 @@ class CoverageThresholds:
     max_cuts_per_sentence: float = 2.0  # visual changes inside one simple sentence
     important_scene: float = 0.7  # scenes at/above this importance need real visual support for claims, numbers, dates, warnings and evidence
     min_shot_seconds: float = 0.8  # shots shorter than this are "very short"
+    gap_error_seconds: float = 1.0  # an unintended picture gap under narration longer than this is an ERROR (shorter: a WARNING)
+    error_uncovered_seconds: float = 1.0  # narration without a picture for longer than this (scaled by scene importance) is an ERROR
+    hold_warning_factor: float = 1.5  # a hold this many times the limit is a WARNING instead of a NOTICE
+    simple_sentence_words: int = 14  # a sentence up to this long is "simple": it carries at most ``max_cuts_per_sentence`` picture changes
+    short_cluster: int = 3  # this many consecutive too-short shots in a row are a cluster
 
 
 @dataclass
