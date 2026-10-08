@@ -508,7 +508,10 @@ class QCService:
         p = self._project()
         ctx = QCContext.build(p, ffmpeg=self.ffmpeg, probe=self.probe, rendered_file=Path(output_path))
         project_id = p.project_id
-        expected = {"duration": ctx.duration, "width": p.render_settings and ctx.canvas[0], "height": ctx.canvas[1], "fps": ctx.fps, "has_audio": bool(p.voice_over.asset_id or ctx.audio_clips())}
+        from app.rendering.presets import output_size  # noqa: PLC0415
+
+        out_w, out_h = output_size(*ctx.canvas, p.render_settings.resolution)  # the export is scaled to the chosen resolution
+        expected = {"duration": ctx.duration, "width": out_w, "height": out_h, "fps": p.render_settings.fps or ctx.fps, "has_audio": bool(p.voice_over.asset_id or ctx.audio_clips())}
         checker = RenderedFileChecker()
 
         def work(jc) -> dict[str, Any]:
