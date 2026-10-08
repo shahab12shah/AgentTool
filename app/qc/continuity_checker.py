@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+import numpy as np
 from PIL import Image
 
 from app.core.textutil import content_terms
@@ -425,8 +426,7 @@ class ContinuityChecker(BaseChecker):
                 p = ThumbnailService.thumbnail_path(ctx.root, a)  # type: ignore[arg-type]
                 try:
                     with Image.open(p) as im:
-                        px = im.convert("L").resize((16, 16)).getdata()
-                        lum[a.id] = sum(px) / (255.0 * len(px))
+                        lum[a.id] = float(np.asarray(im.convert("L").resize((16, 16)), dtype=np.float64).mean()) / 255.0
                 except (OSError, ValueError):
                     lum[a.id] = None
             return lum[a.id]

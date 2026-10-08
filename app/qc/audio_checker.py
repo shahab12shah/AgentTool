@@ -459,7 +459,7 @@ class AudioChecker(BaseChecker):
                     description=f"While the voice speaks the music is {rel_speech:+.1f} dB relative to it (louder than the voice) for {loud_s:.1f} s.", why="Voice must stay dominant; the narration is the message.",
                     current=f"{rel_speech:+.1f} dB vs voice", recommended=f"{cfg.music_over_voice_db:.0f} dB or lower", suggested_fix="Lower the music under speech (ducking) or reduce its level.", confidence=conf,
                     viewer_impact=0.9, signature=sha(g.key), metrics=m, fix=self._duck_fix(ctx, cfg, g, speech, gain_speech, rel_speech, assignments), **where))
-            elif (depth is not None and depth < cfg.min_duck_db and (masked_s >= 1.0 or loud_s >= 1.0)) or (depth is None and loud_s >= 1.0 and masked_s >= 1.0):
+            elif depth is not None and depth < cfg.min_duck_db and rel_speech > cfg.music_over_voice_db - cfg.min_duck_db:  # it neither dips nor sits far enough under the voice to need no dip
                 has_depth = f" The music only falls {max(depth, 0.0):.1f} dB under speech (needs {cfg.min_duck_db:.0f} dB)." if depth is not None else ""
                 out.issues.append(self.issue(
                     "audio.insufficient_ducking", QCCategory.AUDIO, Severity.WARNING, "Music is not lowered enough under the voice",
