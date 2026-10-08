@@ -128,3 +128,17 @@ def test_helper_contract(tmp_path):
     for dim, code in (("caption_density", "style.caption_deviation"), ("motion_intensity", "style.motion_deviation")):
         got = style_issue(_Probe.checker, ctx, dim, 0.0)
         assert got is not None and got.code == code
+
+
+def test_motion_and_caption_style_are_compared_project_wide(tmp_path):
+    p, clips = build(tmp_path, cuts_for(6))
+    apply_style(p, pacing=30.0)  # pacing matches; motion 50 and captions 60 in the reference, but this edit has no motion and no captions
+    out = run_checker(PacingChecker(), qc_ctx(p))
+    got = {i.code for i in out.issues if i.category.value == "STYLE"}
+    assert {"style.motion_deviation", "style.caption_deviation"} <= got and "style.pacing_deviation" not in got
+    from app.timeline.keyframes import Keyframe
+
+    for c in clips:
+        c.keyframes = [Keyframe("scale", 0.0, 1.0), Keyframe("scale", 2.0, 1.6)]
+    out2 = run_checker(PacingChecker(), qc_ctx(p))
+    assert "style.motion_deviation" not in {i.code for i in out2.issues}

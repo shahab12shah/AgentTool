@@ -23,7 +23,7 @@ from app.qc.checker_base import BaseChecker, CheckerOutput
 from app.qc.context import ProgressFn, QCContext, sha
 from app.qc.issue_model import QCCategory
 from app.qc.severity import Severity
-from app.qc.style_compat import style_issue, target_score
+from app.qc.style_compat import measured_scores, style_issue, target_score
 from app.reference.style_model import PACING_POINTS, pacing_class, scale
 from app.timeline.clip import KIND_GRAPHIC, KIND_TEXT, Clip
 from app.timeline.track import Track
@@ -95,7 +95,7 @@ class PacingChecker(BaseChecker):
     id = "pacing"
     label = "Pacing & cut timing"
     categories = (QCCategory.PACING, QCCategory.CUT_TIMING, QCCategory.STYLE)
-    domains = ("timeline", "scenes", "transcript", "reference")
+    domains = ("timeline", "scenes", "transcript", "captions", "reference")
     settings_sections = ("pacing", "coverage", "style")
     scene_local = False
     version = "1"
@@ -486,6 +486,13 @@ class PacingChecker(BaseChecker):
         iss = style_issue(self, ctx, "pacing", measured, explained_by=explained, conflict=conflict)
         if iss is not None:
             out.issues.append(iss)
+        # the other measurable dimensions of an applied reference style, project-wide (the motion and caption checkers are per scene / per caption)
+        scores = measured_scores(ctx)
+        for dim in ("motion_intensity", "caption_density"):
+            if scores is not None and target_score(ctx, dim) is not None:
+                extra = style_issue(self, ctx, dim, scores.get(dim))
+                if extra is not None:
+                    out.issues.append(extra)
 
 
 def _t(t: float) -> str:

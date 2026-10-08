@@ -19,12 +19,51 @@ from app.qc.issue_model import QCCategory, QCIssue
 from app.qc.severity import Severity
 
 try:  # the reference engine is a separate subsystem: QC works without it
-    from app.reference.style_model import DIMENSION_LABELS, DIMENSIONS
+    from app.reference.style_model import DIMENSION_LABELS, DIMENSIONS, StyleFeatures, StyleScores, clamp, compute_scores
 except ImportError:  # pragma: no cover
-    DIMENSIONS, DIMENSION_LABELS = (), {}
+    DIMENSIONS, DIMENSION_LABELS, StyleFeatures, StyleScores = (), {}, None, None
 
 CODES = {"pacing": "style.pacing_deviation", "caption_density": "style.caption_deviation", "motion_intensity": "style.motion_deviation", "transition_frequency": "style.transition_deviation"}
 MIN_CONFIDENCE = 0.3  # a dimension the reference analysis was unsure about is not held against the project
+
+
+def measured_scores(ctx: QCContext) -> "StyleScores | None":
+    """The project's own style scores on the Phase 7 scale. The reference engine's project measurement is used when it exists (so project and reference are measured alike);
+    otherwise a conservative estimate from the timeline (motion keyframes, caption clips)."""
+    if StyleScores is None:
+        return None
+
+    def calc():
+        try:
+            from app.reference.project_metrics import project_style_profile  # noqa: PLC0415
+
+            return project_style_profile(ctx.project).scores
+        except Exception:  # noqa: BLE001 - absent or failing measurement: fall back to the estimate below
+            return compute_scores(_estimate(ctx))
+
+    return ctx.memo("style.scores", calc)
+
+
+def _estimate(ctx: QCContext) -> "StyleFeatures":
+    dur = max(ctx.duration, 1e-6)
+    minutes = dur / 60.0
+    vis = ctx.visual_clips()
+    moving, intensities = 0, []
+    for _t, c in vis:
+        rate = 0.0
+        pts = sorted((k for k in c.keyframes if k.property == "scale"), key=lambda k: k.time)
+        for a, b in zip(pts, pts[1:]):
+            rate = max(rate, abs(b.value - a.value) / max(1e-6, b.time - a.time))
+        if pts or any(k.property in ("position_x", "position_y") for k in c.keyframes):
+            moving += 1
+            intensities.append(clamp(rate / 0.3))
+    caps = ctx.caption_clips()
+    f = StyleFeatures(duration=dur)
+    f.motion_events_per_minute = moving / minutes
+    f.average_motion_intensity = sum(intensities) / len(intensities) if intensities else 0.0
+    f.captions_per_minute = len(caps) / minutes
+    f.caption_coverage = clamp(sum(c.duration for _t, c in caps) / dur)
+    return f
 
 
 @dataclass
