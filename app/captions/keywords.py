@@ -40,8 +40,8 @@ def _clean(t: str) -> str:
 
 
 class KeywordService:
-    def detect(self, scene, words, audio_emphasis: set[str] | None = None) -> list[Keyword]:
-        """Keywords of one scene, best first, within the scene's emphasis budget."""
+    def detect(self, scene, words, audio_emphasis: set[str] | None = None, rate: float = 0.5) -> list[Keyword]:
+        """Keywords of one scene, best first, within the scene's emphasis budget. ``rate`` scales the budget (0.5 = the default; an applied reference style may set it)."""
         by_id = {w.word_id: w for w in words}
         found: list[Keyword] = []
         used: set[str] = set()
@@ -69,7 +69,7 @@ class KeywordService:
             w = by_id.get(wid)
             if w is not None:
                 add(K.CONCEPT, [wid], "Spoken with noticeably more emphasis.", "audio")
-        budget = max(1, math.ceil(len(words) * 0.08) + 1)
+        budget = max(1, math.ceil(len(words) * 0.08 * (max(0.0, rate) / 0.5)) + 1)
         found.sort(key=lambda k: -k.importance)
         return found[:budget]
 

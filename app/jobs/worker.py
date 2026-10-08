@@ -32,14 +32,14 @@ class JobContext:
         if self._job.cancel_requested:
             raise JobCancelled()
 
-    def report(self, progress: float | None = None, message: str | None = None) -> None:
-        """Report progress in percent (0-100) and/or a status message. Throttled to ~20 Hz."""
+    def report(self, progress: float | None = None, message: str | None = None, *, force: bool = False) -> None:
+        """Report progress in percent (0-100) and/or a status message. Throttled to ~20 Hz; ``force`` publishes now (a new stage should never be skipped)."""
         if progress is not None:
             self._job.progress = max(0.0, min(100.0, float(progress)))
         if message is not None:
             self._job.message = message
         now = time.monotonic()
-        if now - self._last_emit >= 0.05 or self._job.progress >= 100.0:
+        if force or now - self._last_emit >= 0.05 or self._job.progress >= 100.0:
             self._last_emit = now
             self._notify(self._job)
 

@@ -37,7 +37,12 @@ DEFAULT_PRESET = "professional"
 
 
 def preset_for(settings: EditingSettings) -> StylePreset:
-    return PRESETS.get(settings.style, PRESETS[DEFAULT_PRESET])
+    preset = PRESETS.get(settings.style, PRESETS[DEFAULT_PRESET])
+    if settings.reference is not None and not settings.reference.is_empty:  # an applied reference style (see effective.py): soft parameters only
+        from app.editing.effective import preset_with_reference  # noqa: PLC0415
+
+        return preset_with_reference(preset, settings)
+    return preset
 
 
 def shot_factor(settings: EditingSettings) -> float:

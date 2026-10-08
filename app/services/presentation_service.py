@@ -28,6 +28,7 @@ from app.core.commands import Command, CommandStack, CompositeCommand
 from app.core.events import EventBus, Topics
 from app.core.exceptions import AppError
 from app.editing.context import EditingContext, SceneContext, build_context
+from app.editing.effective import effective_audio_settings, effective_caption_settings, keyword_rate
 from app.editing.models import Creator, DecisionType, TextGraphic, now_iso
 from app.editing.strategy import RuleBasedProvider
 from app.editing.validator import ValidationIssue
@@ -77,6 +78,12 @@ ROLES = ("music", "sfx")
 
 class PresentationError(AppError):
     """The presentation layer could not be created or changed."""
+
+
+def _remember_user_choice(old, new, changes: dict) -> list[str]:
+    """``user_set`` of a settings object after the user changed some fields: those fields are remembered, so an applied reference style never overrides them."""
+    changed = [k for k in changes if k != "user_set" and getattr(old, k) != getattr(new, k)]
+    return list(dict.fromkeys([*old.user_set, *changed]))
 
 
 @dataclass
@@ -136,6 +143,7 @@ class PresentationService:
             raise PresentationError("The safe margins leave no room for text.")
         if not (0.3 <= new.reading_speed <= 2.0):
             raise PresentationError("Reading speed must be between 0.3 and 2.0.")
+        new.user_set = _remember_user_choice(p.caption_settings, new, changes)
         self._commands.execute(SetSettingCommand(p, "caption_settings", new, "Change caption settings"))
         return new
 
@@ -147,6 +155,7 @@ class PresentationService:
                 raise PresentationError("Levels must be between 0% and 150%.")
         if new.important_level > new.music_level + 1e-9 or new.music_level > new.pause_level + 1e-9 and new.pause_level > 0:
             raise PresentationError("Levels must satisfy: important ≤ normal ≤ pause rise.")
+        new.user_set = _remember_user_choice(p.audio_settings, new, changes)
         cmds: list[Command] = [SetSettingCommand(p, "audio_settings", new, "Change audio settings")]
         if "voice_enhancement" in changes and changes["voice_enhancement"] != p.audio_settings.voice_enhancement:
             proc = replace(p.audio_processing, enabled=bool(changes["voice_enhancement"]))
@@ -193,7 +202,7 @@ class PresentationService:
             changed = bool(voice_hash and cs.generated_audio_hash and cs.generated_audio_hash != voice_hash)
             tr_changed = bool(tr is not None and cs.generated_transcript_id and cs.generated_transcript_id != tr.transcript_id)
             out["captions_outdated"] = changed or tr_changed
-            out["settings_changed"] = g.captions.input_hash != settings_hash(cs, (p.settings.width, p.settings.height)) and not out["captions_outdated"]
+            out["settings_changed"] = g.captions.input_hash != settings_hash(effective_caption_settings(p), (p.settings.width, p.settings.height)) and not out["captions_outdated"]
             out["acknowledged"] = bool(out["captions_outdated"] and cs.stale_acknowledged_hash == voice_hash)
         if p.audio_analysis is not None and voice_hash and p.audio_analysis.audio_hash != voice_hash:
             out["analysis_outdated"] = True
@@ -416,12 +425,13 @@ class PresentationService:
 
         if p.root is None:
             return None
-        cs = p.caption_settings
+        cs = effective_caption_settings(p)
         audio = sorted(p.audio_analysis.emphasis_candidates) if p.audio_analysis else []
         styles = {k: v for k, v in p.caption_styles.items()}
+        rate = keyword_rate(p)
         key = hashlib.sha1(_json.dumps([sc.scene.id, [(w.word_id, w.text, round(w.start, 3), round(w.end, 3)) for w in sc.words], settings_hash(cs, ctx.canvas), audio,
                                         [(n.text, n.kind.value) for n in sc.scene.numbers], [(e.text, e.type.value) for e in sc.scene.entities],
-                                        {k: v.__dict__ for k, v in styles.items()}], default=str).encode()).hexdigest()[:20]
+                                        {k: v.__dict__ for k, v in styles.items()}, *([rate] if rate is not None else [])], default=str).encode()).hexdigest()[:20]
         return p.root / "cache" / "presentation" / "captions" / f"{key}.json"
 
     def _plan_captions(self, sc: SceneContext, p: Project, ctx: EditingContext):
@@ -447,7 +457,7 @@ class PresentationService:
         return segs, kws
 
     def _plan_captions_fresh(self, sc: SceneContext, p: Project, ctx: EditingContext):
-        cs = p.caption_settings
+        cs = effective_caption_settings(p)  # the user's caption settings with an applied reference style laid over them (identical without a style)
         eng = CaptionEngine(cs, self.caption_styles(), ctx.canvas)
         words = [CaptionWord(w.word_id, w.text, w.start, w.end) for w in sc.words]
         if not words:
@@ -464,7 +474,8 @@ class PresentationService:
             groups.append(leftover)
             groups.sort(key=lambda g: g[0].start)
         audio_emph = set(p.audio_analysis.emphasis_candidates) if p.audio_analysis else set()
-        kws = self.keywords.detect(sc.scene, sc.words, audio_emph) if (cs.keyword_highlight or cs.number_emphasis) else []
+        rate = keyword_rate(p)
+        kws = (self.keywords.detect(sc.scene, sc.words, audio_emph) if rate is None else self.keywords.detect(sc.scene, sc.words, audio_emph, rate=rate)) if (cs.keyword_highlight or cs.number_emphasis) else []
         segs = eng.segment(sc.scene.id, groups, kws, scene_end=sc.scene.end)
         return segs, kws
 
@@ -611,7 +622,7 @@ class PresentationService:
                 self._commit_audio(asm, p, ctx, audio_ids)
                 placed[Part.AUDIO.value] = sorted(audio_ids)
             g = asm.state.generation
-            cs_hash = settings_hash(p.caption_settings, ctx.canvas)
+            cs_hash = settings_hash(effective_caption_settings(p), ctx.canvas)
             tr = p.transcription.transcript
             for part in wanted:
                 done_ids = set(placed.get(part, []))
@@ -691,7 +702,7 @@ class PresentationService:
         return out
 
     def _commit_audio(self, asm: PresentationAssembler, p: Project, ctx: EditingContext, scene_ids: set[str]) -> None:
-        aset = p.audio_settings
+        aset = effective_audio_settings(p)  # the user's audio settings with an applied reference style laid over them (identical without a style)
         total = self._total_duration(p)
         placed_sfx: list[tuple[float, float]] = []
         if aset.sfx_enabled:
@@ -719,7 +730,7 @@ class PresentationService:
             plan_.music_state = {"level": aset.music_level, "important_level": aset.important_level, "auto_ducking": aset.auto_ducking}
 
     def _duck_plan(self, asm: PresentationAssembler, p: Project, ctx: EditingContext, speech, total: float, sfx: list[tuple[float, float]]):
-        aset = p.audio_settings
+        aset = effective_audio_settings(p)
         svc = AudioDuckingService(aset)
         important: list[Important] = []
         for sc in ctx.scenes:
@@ -1061,7 +1072,8 @@ class PresentationService:
         total = self._total_duration(p)
         sfx = [(c.timeline_start, c.timeline_end) for t in asm.state.timeline.tracks if t.kind is TrackKind.AUDIO for c in t.clips if c.audio.get("role") == "SFX"]
         plan = self._duck_plan(asm, p, ctx, self._speech(p), total, sfx)
-        asm.apply_ducking(plan, AudioDuckingService(p.audio_settings).keyframes(plan), p.audio_settings)
+        aset = effective_audio_settings(p)
+        asm.apply_ducking(plan, AudioDuckingService(aset).keyframes(plan), aset)
 
     def _music_pieces(self, asm: PresentationAssembler, assignment_id: str) -> list:
         pieces = [c for c in asm.state.timeline.get_track("track_a2").clips if c.metadata.get("assignment_id") == assignment_id]

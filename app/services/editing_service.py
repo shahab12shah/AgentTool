@@ -94,6 +94,10 @@ class EditingService:
             raise EditingError(f"Unknown editing style “{new.style}”.")
         for k in ("pacing", "motion_intensity", "transition_frequency"):
             setattr(new, k, min(1.0, max(0.0, float(getattr(new, k)))))
+        # what the user changes on purpose is remembered: an applied reference style never overrides it (see editing/effective.py)
+        changed = [k for k in changes if k not in ("user_set", "reference") and getattr(p.editing_settings, k) != getattr(new, k)]
+        if changed:
+            new.user_set = list(dict.fromkeys([*p.editing_settings.user_set, *changed]))
         self._commands.execute(SetEditingSettingsCommand(p, new))
         return new
 

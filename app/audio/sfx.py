@@ -55,7 +55,7 @@ class SfxPlanner:
     def plan(self, moments: list[SfxMoment], library: dict[str, list], duration: float) -> list[SfxEvent]:
         """``library``: category -> [(asset_id, asset_duration)]. Returns the chosen events, best moments first within the rate limit."""
         s = self.s
-        budget = max(1, int(round(s.max_sfx_per_minute * duration / 60.0))) if moments else 0
+        budget = (max(1, int(round(s.max_sfx_per_minute * duration / 60.0))) if s.max_sfx_per_minute > 0 else 0) if moments else 0  # a rate of 0 means no effects
         chosen: list[SfxMoment] = []
         for m in sorted(moments, key=lambda m: -m.score):
             if len(chosen) >= budget:

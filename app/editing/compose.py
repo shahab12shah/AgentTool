@@ -95,7 +95,7 @@ class PreviewComposer:
 
     # ------------------------------------------------------------------ frame
     def frame_at(self, t: float) -> FrameState:
-        tl, assets = self.p.timeline, self.p.assets
+        tl = self.p.timeline
         fs = FrameState(t)
         for sc in self.p.scenes:
             if sc.start <= t < sc.end:

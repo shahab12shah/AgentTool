@@ -10,7 +10,8 @@ import re
 from dataclasses import dataclass
 
 from app.analysis.models import EntityType, NumberKind
-from app.editing.context import AssetInfo, EditingContext, SceneContext
+from app.editing.context import AssetInfo, SceneContext
+from app.editing.effective import duck_level_for, pause_level_for
 from app.editing.models import (
     AudioPlan,
     DecisionType,
@@ -326,8 +327,14 @@ class AudioPlanner:
         self.preset, self.settings = preset, settings
 
     def global_plan(self) -> AudioPlan:
-        return AudioPlan(music_level=self.preset.music_level, duck_level=round(self.preset.music_level * 0.55, 3),
-                         rise_level=round(self.preset.music_level * 1.3, 3))
+        level, duck, rise = self.preset.music_level, self.preset.music_level * 0.55, self.preset.music_level * 1.3
+        ref = getattr(self.settings, "reference", None)
+        if ref is not None:  # an applied reference style sets the depth of the duck and the rise in pauses (see effective.py)
+            if ref.ducking_strength is not None:
+                duck = duck_level_for(level, ref.ducking_strength)
+            if ref.pause_usage is not None:
+                rise = pause_level_for(level, ref.pause_usage)
+        return AudioPlan(music_level=level, duck_level=round(duck, 3), rise_level=round(rise, 3))
 
     def plan(self, ctx: SceneContext, brief: SceneEditingBrief, audio: AudioPlan) -> list[DuckPlan]:
         if not self.settings.smart_audio_ducking:

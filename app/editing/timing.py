@@ -6,8 +6,9 @@ import math
 from dataclasses import dataclass
 
 from app.analysis.models import NumberKind
+from app.editing.effective import hook_factor
 from app.editing.context import AssetInfo, SceneContext
-from app.editing.models import Operation, SceneEditingBrief, VisualSegment
+from app.editing.models import Operation, SceneEditingBrief
 from app.editing.presets import StylePreset, shot_factor
 from app.editing.models import EditingSettings
 from app.transcription.models import Word
@@ -55,8 +56,13 @@ class ShotTimingService:
         short_sentences = brief.sentence_count >= 2 and ctx.scene.duration / max(1, brief.sentence_count) < 2.4
         if brief.importance >= 0.8 and (short_sentences or brief.emotional_intensity > 0.6):
             t *= 0.8  # dramatic statements get punchier
-        t = max(t, self.reading_time(brief, ctx))
-        return min(p.max_shot, max(p.min_shot, t))
+        ref = self.settings.reference
+        if ref is not None:
+            t *= hook_factor(self.settings, ctx.scene.start)  # an applied reference style may cut the opening faster
+        reading = self.reading_time(brief, ctx)
+        t = max(t, reading)
+        # the style may lower the longest shot to get more cuts, but never below the time a viewer needs to read what is on screen
+        return min(p.max_shot if ref is None else max(p.max_shot, reading), max(p.min_shot, t))
 
     @staticmethod
     def reading_time(brief: SceneEditingBrief, ctx: SceneContext) -> float:

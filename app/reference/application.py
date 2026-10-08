@@ -131,6 +131,7 @@ class ProjectContent:
     median_words_per_second: float = 2.5
     number_scene_share: float = 0.0
     still_image_share: float = 0.0
+    median_sentence_seconds: float = 0.0  # narration sentence length (0 = unknown): a cut every few words would not follow the speech
 
 
 @dataclass

@@ -295,8 +295,12 @@ class ReferenceService:
         self._publish("status", rid)
 
         def work(ctx) -> ReferenceAnalysis:
+            current = {"stage": ""}
+
             def report(stage: str, fraction: float, message: str) -> None:
-                ctx.report(fraction * 100.0, f"{stage}: {message}" if message and message != stage else stage)
+                changed = stage != current["stage"]  # a new stage is always published (the 20 Hz throttle must not swallow a short one)
+                current["stage"] = stage
+                ctx.report(fraction * 100.0, f"{stage}: {message}" if message and message != stage else stage, force=changed)
 
             def say(line: str) -> None:
                 logs.append(line)

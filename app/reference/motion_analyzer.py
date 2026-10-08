@@ -291,7 +291,6 @@ class MotionAnalyzer:
         ``measured`` marks samples a good window describes directly; ``span`` is the first and last sample any window can describe (the head and tail of a
         shot never are). ``known`` adds the samples filled in: gaps of up to ``MAX_FILL`` samples are interpolated, the head and tail the windows cannot
         reach are held. The rest are zero = no measurable camera motion."""
-        fps = float(sig.fps)
         lag = max(1, int(sig.lag))
         m = b - a + 1
         windows = np.arange(a + lag, b + 1)  # window i compares sample i with sample i - lag, both inside the shot

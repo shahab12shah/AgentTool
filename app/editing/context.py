@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.analysis.lexicon import TRANSITIONS_STRONG
 from app.analysis.models import Entity, Scene, SentenceAnalysis, VisualIntent
+from app.editing.effective import effective_editing_settings, reference_hash_part
 from app.editing.models import EditingSettings, VisualStatus
 from app.media.asset import AssetType
 from app.research.models import Candidate, CandidateScore, VisualAssignment
@@ -131,7 +132,7 @@ def scene_hash(sc: SceneContext, settings: EditingSettings, canvas: tuple[int, i
         "prev": [sc.prev.topic, sc.prev.asset_id, sc.prev.source_type] if sc.prev else None,
         "settings": [settings.style, settings.pacing, settings.motion_intensity, settings.transition_frequency, settings.text_emphasis,
                      settings.number_emphasis, settings.evidence_treatment, settings.smart_transitions, settings.smart_audio_ducking,
-                     settings.caption_mode, settings.provider],
+                     settings.caption_mode, settings.provider, *reference_hash_part(settings)],
         "canvas": list(canvas), "section": sc.starts_section,
     }
     return hashlib.sha1(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16]
@@ -139,7 +140,7 @@ def scene_hash(sc: SceneContext, settings: EditingSettings, canvas: tuple[int, i
 
 def build_context(project, settings: EditingSettings | None = None) -> EditingContext:
     """Snapshot the project (scenes, transcript, intents, approved visuals, assets). Never mutates the project."""
-    settings = deepcopy(settings or project.editing_settings)
+    settings = effective_editing_settings(project, settings)  # the user's settings with an applied reference style laid over them (a copy; identical without a style)
     tr = project.transcription.transcript
     scenes = list(project.scenes)
     extras = project.editing_strategy.scene_visuals
