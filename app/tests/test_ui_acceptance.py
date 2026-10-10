@@ -38,6 +38,16 @@ def pump(cond, timeout: float = 20.0) -> None:
     raise AssertionError("condition not met in time")
 
 
+def wait_ms(ms: int) -> None:
+    """Process events for ``ms`` milliseconds without ``QTest.qWait`` (it can hold the GIL and starve worker threads, see ``pump``)."""
+    import time
+
+    end = time.monotonic() + ms / 1000.0
+    while time.monotonic() < end:
+        QApplication.processEvents()
+        time.sleep(0.005)
+
+
 def settle(ws) -> None:
     pump(lambda: ws.jobs.wait_idle(0.0) and ws.autosave.wait_idle(0.0))
 

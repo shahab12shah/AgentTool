@@ -23,7 +23,7 @@ from PySide6.QtCore import QItemSelectionModel, QPoint, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QCheckBox, QInputDialog, QMessageBox  # noqa: E402
 
-from app.tests.test_ui_acceptance import create_project, pump, qapp  # noqa: E402,F401  (fixtures)
+from app.tests.test_ui_acceptance import create_project, pump, qapp, wait_ms  # noqa: E402,F401  (fixtures)
 from app.ui.timeline_canvas import RULER_H  # noqa: E402
 
 pytestmark = needs_ffmpeg
@@ -343,16 +343,16 @@ def test_progress_ticks_do_not_rebuild_the_page_and_a_hidden_page_waits_until_it
     win.go_to("Quality")
     run_and_wait(win)
     panel = win.qc_panel
-    QTest.qWait(300)  # let the refreshes queued by the run itself finish first
+    wait_ms(300)  # let the refreshes queued by the run itself finish first
     built = []
     real = panel._fill_issues
     monkeypatch.setattr(panel, "_fill_issues", lambda *a: built.append(1) or real(*a))
     win.ws.bus.publish("qc.updated", kind="progress", fraction=0.5, message="x")
-    QTest.qWait(250)
+    wait_ms(250)
     assert not built  # only the progress widgets follow a tick
     win.go_to("Timeline")  # the page is no longer shown
     win.ws.bus.publish("qc.updated", kind="issue_changed")
-    QTest.qWait(250)
+    wait_ms(250)
     assert not built and panel._dirty
     win.go_to("Quality")
     assert built and not panel._dirty

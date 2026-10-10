@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QMessageBox  # noqa: E402
 from app.editing.models import Creator  # noqa: E402
 from app.main import create_window  # noqa: E402
 from app.presentation.models import PresentationType  # noqa: E402
-from app.tests.test_ui_acceptance import pump, qapp, win  # noqa: E402,F401  (fixtures)
+from app.tests.test_ui_acceptance import pump, qapp, wait_ms, win  # noqa: E402,F401  (fixtures)
 
 pytestmark = needs_ffmpeg
 
@@ -240,5 +240,5 @@ def test_waveforms_are_generated_in_the_background_and_painted_on_audio_tracks(w
         if a.type.value == "audio" and a.id != vo:
             project.asset_path(a).write_bytes(b"junk")
     canvas.grab()
-    QTest.qWait(50)
+    wait_ms(50)
     canvas.grab()
