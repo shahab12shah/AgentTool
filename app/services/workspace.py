@@ -42,6 +42,7 @@ from app.qc.qc_service import QCService
 from app.performance.change_tracker import ProjectChangeTracker
 from app.services.reference_service import ReferenceService
 from app.services.render_service import RenderService
+from app.services.performance_service import PerformanceService
 from app.project.phase2_commands import SetVisualPreferencesCommand
 from app.storage.paths import AppPaths
 
@@ -86,6 +87,8 @@ class Workspace:
         self.reference = ReferenceService(self.projects, self.jobs, self.bus, self.apply_command, self.commands.execute, lambda: self.settings, self.editing._checkpoint)
         self.qc = QCService(self.projects, self.jobs, self.bus, self.apply_command, self.commands.execute, lambda: self.settings, self.editing._checkpoint)
         self.qc.tracker = self.changes
+        self.performance = PerformanceService(self.projects, self.jobs, self.bus, self.commands.execute, lambda: self.settings, self.settings_store.save,
+                                              lambda: self.render.engine.hardware, proxy_in_use=lambda p: any(r.proxy_path == str(p) for r in self.render.proxies.records().values() if r.proxy_status in ("READY", "QUEUED")))
         self.render.qc_gate = self.qc.export_gate  # the export is blocked only by a QC run that still matches the project
         self._install_fix_engine()
         self.bus.subscribe(Topics.RENDER_HISTORY_CHANGED, self._on_render_history)
@@ -308,5 +311,6 @@ class Workspace:
         if project is not None and not project.dirty:
             self.autosave.clear(project.project_id)  # clean exit leaves no recovery data
         self.render.shutdown()
+        self.performance.shutdown()
         self.jobs.shutdown()
         self.autosave.shutdown()

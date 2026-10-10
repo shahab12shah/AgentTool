@@ -77,8 +77,10 @@ def build_report(profiler: Profiler, monitor: ResourceMonitor | None = None, *, 
         for k in ("memory", "disk", "cpu"):
             if pr[k] != "normal":
                 findings.append(f"{k} pressure is {pr[k]}.")
-    if jobs and jobs.get("failed_recent", 0) >= 3:
-        findings.append(f"{jobs['failed_recent']} recent background jobs failed.")
+    failed = (jobs or {}).get("failed_recent", 0)
+    failed = len(failed) if isinstance(failed, (list, tuple, set)) else int(failed or 0)
+    if failed >= 3:
+        findings.append(f"{failed} recent background jobs failed.")
     report = {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "metrics_enabled": snap["enabled"], "uptime_s": snap["uptime_s"], "bottlenecks": ranked, "findings": findings,
               "operations": snap["operations"], "counters": snap["counters"], "gauges": snap["gauges"], "cache_hit_rates": rates, "cache": cache_stats or {},
               "resources": sample.to_dict() if sample else None, "pressure": monitor.pressure(sample) if monitor else None, "jobs": jobs or {}, "hardware": hardware or {},
