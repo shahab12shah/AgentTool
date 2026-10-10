@@ -82,6 +82,12 @@ class ReferenceService:
         self._jobs_by_ref: dict[str, Job] = {}
         self._lock = threading.RLock()
         self._cache: dict[str, ReferenceAnalysis] = {}  # in-memory copy of loaded analyses (reference id -> analysis)
+        bus.subscribe(Topics.PROJECT_CLOSED, lambda _t, _p: self._drop_memory_cache())  # the in-memory copies belong to the project that was open
+
+    def _drop_memory_cache(self) -> None:
+        with self._lock:
+            self._cache.clear()
+            self._jobs_by_ref.clear()
 
     # ------------------------------------------------------------------ basics
     def _project(self) -> Project:

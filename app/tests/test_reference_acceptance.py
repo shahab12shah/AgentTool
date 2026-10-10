@@ -113,11 +113,6 @@ def test_the_complete_reference_workflow(pres_ws, ref_video, tmp_path):
     narration = " ".join(s.narration.lower() for s in p.scenes)
     assert all(t.lower().strip(".,;:") in narration or all(w in narration for w in t.lower().split()) for t in texts if t)  # on-screen text comes from the user's narration
 
-    # --- a setting the user makes now beats the style
-    ws.editing.update_settings(motion_intensity=0.2)
-    assert effective_editing_settings(p).motion_intensity == 0.2 and effective_editing_settings(p).reference.target_shot_duration is not None
-    ws.editing.update_settings(motion_intensity=0.5)
-
     # --- save, close, reopen: the whole reference setup is restored and the next generation gives the same result
     root = p.root
     sig = ws.reference.profile().signature()
@@ -130,13 +125,18 @@ def test_the_complete_reference_workflow(pres_ws, ref_video, tmp_path):
     generate_all(ws)
     assert structure(p) == styled_structure
 
+    # --- a setting the user makes now beats the style (the next generation uses the user's motion, the rest of the style still applies)
+    ws.editing.update_settings(motion_intensity=0.2)
+    assert effective_editing_settings(p).motion_intensity == 0.2 and effective_editing_settings(p).reference.target_shot_duration is not None
+    ws.editing.update_settings(motion_intensity=0.5)
+    assert "motion_intensity" in p.editing_settings.user_set
+
     # --- undo of the application restores the previous strategy; removing the reference and the style returns the project to the baseline
     ws.reference.remove_reference(ref.reference_id)
     assert not folder.exists() and p.reference_assets == {} and p.reference_style_profile is None
     assert p.reference_settings.enabled  # the abstract preferences stay until the user removes them ...
     ws.reference.clear_style()
     assert not p.reference_settings.enabled and p.reference_style_overrides.is_empty
-    ws.editing.update_settings(motion_intensity=0.5)
     generate_all(ws)
     assert structure(p) == base_structure and measures(ws) == base  # ... and then everything is exactly as it was without a reference
     p.validate()
