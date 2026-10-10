@@ -377,9 +377,21 @@ class ProjectChangeTracker:
         return self._broad(scope, unknown=True)
 
     # ---- helpers used by the handlers
-    def _scenes_in_range(self, t0: float, t1: float, margin: float = QC_NEAR_SECONDS) -> set[str]:
+    def _scenes_in_range(self, t0: float, t1: float, margin: float = 0.0) -> set[str]:
         idx = self._scene_index()
-        return set(idx.overlapping(t0 - margin, t1 + margin)) if idx else set()
+        if idx is None:
+            return set()
+        a, b = t0 - margin + 2 * _EPS, t1 + margin - 2 * _EPS  # touching a boundary is not overlapping it
+        if b <= a:
+            a = b = (t0 + t1) / 2
+        return set(idx.overlapping(a, b))
+
+    def _range_into(self, e: _Effect, scene_id: str, t0: float, t1: float) -> None:
+        """A clip's footprint: its own scene(s) are affected directly; the scenes within QC's look-around distance are affected through their surroundings."""
+        if scene_id:
+            e.direct.add(scene_id)
+        e.direct |= self._scenes_in_range(t0, t1)
+        e.neigh |= self._scenes_in_range(t0, t1, QC_NEAR_SECONDS)
 
     def _clips_effect(self, clips: Iterable[Any]) -> _Effect:
         e = _Effect(domains={D_TIMELINE, D_PACING})
@@ -388,9 +400,7 @@ class ProjectChangeTracker:
             if c is None:
                 continue
             seen += 1
-            if c.scene_id:
-                e.direct.add(c.scene_id)
-            e.direct |= self._scenes_in_range(c.timeline_start, c.timeline_start + c.duration)
+            self._range_into(e, c.scene_id, c.timeline_start, c.timeline_start + c.duration)
             e.deps.add(timeline_dep(c.track_id))
             if c.kind == "caption":
                 e.domains.add(D_CAPTIONS)
@@ -399,6 +409,7 @@ class ProjectChangeTracker:
         idx = self._scene_index()
         if idx is not None:
             e.direct &= set(idx.ids)
+            e.neigh &= set(idx.ids)
         return e
 
     def _clips_of(self, cmd: Any) -> list[Any]:
@@ -437,9 +448,7 @@ class ProjectChangeTracker:
             e.all_scenes = True
             return e
         for c in t.clips:
-            if c.scene_id:
-                e.direct.add(c.scene_id)
-            e.direct |= self._scenes_in_range(c.timeline_start, c.timeline_start + c.duration)
+            self._range_into(e, c.scene_id, c.timeline_start, c.timeline_start + c.duration)
         return e
 
     def _asset_effect(self, asset_id: str, cmd: Any = None, domains: Iterable[str] = (D_ASSETS,)) -> _Effect:
@@ -454,9 +463,7 @@ class ProjectChangeTracker:
                 e.domains |= {D_AUDIO, D_TRANSCRIPT}
                 e.deps.add(TRANSCRIPT_DEP)
         for c in clips:
-            if c.scene_id:
-                e.direct.add(c.scene_id)
-            e.direct |= self._scenes_in_range(c.timeline_start, c.timeline_start + c.duration)
+            self._range_into(e, c.scene_id, c.timeline_start, c.timeline_start + c.duration)
         if clips:
             e.domains |= {D_TIMELINE, D_PACING}
         return e
@@ -485,8 +492,44 @@ def _h_track_rename(t: ProjectChangeTracker, c: Any) -> _Effect:
     return _Effect(domains={D_TIMELINE}, deps={timeline_dep(c.track_id)})
 
 
-def _h_whole_timeline(t: ProjectChangeTracker, c: Any) -> _Effect:  # AI edit / presentation installed as one state: the whole timeline may differ
-    e = _Effect(all_scenes=True, domains=set(BROAD_TIMELINE) | {D_EDITING, D_VISUAL}, deps={timeline_dep("*")})
+_STATE_CLIP_CAP = 20000
+
+
+def _briefs_sig(strategy: Any) -> dict:
+    return {sid: (bool(getattr(b, "keep_static", False)), bool(getattr(b, "evidence_treatment_needed", False))) for sid, b in (getattr(strategy, "briefs", None) or {}).items()} if strategy else {}
+
+
+def _h_state_install(t: ProjectChangeTracker, c: Any) -> _Effect:
+    """ApplyEditCommand / ApplyPresentationCommand: a whole candidate state replaces the timeline. The scenes it touches are found by comparing the clips of the state before and after
+    (equality only, no hashing); the parts of the state that QC reads globally (caption settings, ducking, locks, the editing brief) widen the change to every scene."""
+    before, after = getattr(c, "_before", None), getattr(c, "after", None)
+    if before is None or after is None:
+        return t._broad("timeline", unknown=True)
+    tb, ta = {k.id: k for k in before.timeline.tracks}, {k.id: k for k in after.timeline.tracks}
+    cb = {cl.id: cl for tr in before.timeline.tracks for cl in tr.clips}
+    ca = {cl.id: cl for tr in after.timeline.tracks for cl in tr.clips}
+    if len(cb) + len(ca) > 2 * _STATE_CLIP_CAP:
+        return t._broad("timeline", unknown=False)
+    e = _Effect(domains={D_TIMELINE, D_PACING})
+    changed = [cl for i, cl in ca.items() if cb.get(i) != cl] + [cl for i, cl in cb.items() if i not in ca or ca[i] != cl]
+    if changed:
+        e.merge(t._clips_effect(changed))
+    for tid in set(tb) | set(ta):
+        x, y = tb.get(tid), ta.get(tid)
+        if x is None or y is None or (x.kind, x.hidden, x.muted, x.locked, x.solo, round(x.volume, 6)) != (y.kind, y.hidden, y.muted, y.locked, y.solo, round(y.volume, 6)):
+            e.merge(t._track_effect(tid, y or x))
+    wide = False
+    if getattr(before, "caption_settings", None) != getattr(after, "caption_settings", None):
+        e.domains.add(D_CAPTIONS)
+        wide = True
+    if getattr(before, "ducking_events", None) != getattr(after, "ducking_events", None):
+        e.domains.add(D_AUDIO)
+        wide = True
+    locked = lambda st: ({k for k, d in (getattr(st, "decisions", None) or {}).items() if getattr(d, "locked", False)}, sorted(getattr(getattr(st, "generation", None), "locked_scenes", []) or []))  # noqa: E731
+    if locked(before) != locked(after) or _briefs_sig(getattr(before, "strategy", None)) != _briefs_sig(getattr(after, "strategy", None)):
+        e.domains.add(D_EDITING)
+        wide = True
+    e.all_scenes = e.all_scenes or wide
     return e
 
 
@@ -580,7 +623,7 @@ _HANDLERS: dict[str, Callable[[ProjectChangeTracker, Any], _Effect]] = {
     "AddTrackCommand": _h_track, "RemoveTrackCommand": _h_track, "RenameTrackCommand": _h_track_rename, "SetTrackFlagCommand": _h_track, "SetTrackVolumeCommand": _h_track,
     "AddClipCommand": _h_add_clip, "DeleteClipCommand": _h_add_clip, "MoveClipCommand": _h_add_clip, "TrimClipCommand": _h_add_clip, "SetClipPropertiesCommand": _h_add_clip,
     "SplitClipCommand": _h_add_clip,
-    "ApplyEditCommand": _h_whole_timeline, "ApplyPresentationCommand": _h_whole_timeline,
+    "ApplyEditCommand": _h_state_install, "ApplyPresentationCommand": _h_state_install,
     "SetEditingSettingsCommand": _h_editing_settings, "SetSettingCommand": _h_set_setting,
     "MarkUserEditCommand": _h_clip_flag, "RecordUserDeleteCommand": _h_clip_flag, "MarkPresentationEditCommand": _h_clip_flag, "RecordPresentationDeleteCommand": _h_clip_flag,
     "SetScriptCommand": _h_set_script, "AddAssetCommand": _h_add_asset, "RemoveAssetCommand": _h_asset_by_id, "SetAssetExtraCommand": _h_asset_by_id, "RelinkAssetCommand": _h_asset_by_id,

@@ -37,7 +37,9 @@ def _open(tmp_path_factory, scenes: int):
     window.show()
     ws.open_project(sp.project.root)
     window.go_to("Timeline")
-    QApplication.processEvents()
+    pump(lambda: ws.jobs.wait_idle(0.0), timeout=120)  # the (failing, FFmpeg-less) thumbnail jobs publish change events: let them finish first
+    for _ in range(5):
+        QApplication.processEvents()
     return window, ws, sp
 
 

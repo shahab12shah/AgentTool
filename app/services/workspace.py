@@ -39,6 +39,7 @@ from app.services.research_service import ResearchService
 from app.services.editing_service import EditingService
 from app.services.presentation_service import PresentationService
 from app.qc.qc_service import QCService
+from app.performance.change_tracker import ProjectChangeTracker
 from app.services.reference_service import ReferenceService
 from app.services.render_service import RenderService
 from app.project.phase2_commands import SetVisualPreferencesCommand
@@ -58,6 +59,7 @@ class Workspace:
         self.commands = CommandStack(self.bus)
         self.jobs = JobManager(self.bus, dispatcher=dispatcher)
         self.projects = ProjectManager(self.bus, self.paths.recent_projects_file)
+        self.changes = ProjectChangeTracker(self.bus, lambda: self.projects.current, lambda: getattr(getattr(self, "performance", None), "cache", None))  # what each edit can have made stale (incremental QC / preview / cache invalidation)
         self.prober = MediaProber(self.settings.ffprobe_path)
         self.thumbnails = ThumbnailService(self.settings.ffmpeg_path)
         self.importer = MediaImporter(self.prober)
@@ -83,6 +85,7 @@ class Workspace:
                                     lambda project: self.autosave.request(project, force=True))
         self.reference = ReferenceService(self.projects, self.jobs, self.bus, self.apply_command, self.commands.execute, lambda: self.settings, self.editing._checkpoint)
         self.qc = QCService(self.projects, self.jobs, self.bus, self.apply_command, self.commands.execute, lambda: self.settings, self.editing._checkpoint)
+        self.qc.tracker = self.changes
         self.render.qc_gate = self.qc.export_gate  # the export is blocked only by a QC run that still matches the project
         self._install_fix_engine()
         self.bus.subscribe(Topics.RENDER_HISTORY_CHANGED, self._on_render_history)

@@ -32,7 +32,7 @@ from app.project.project import Project
 from app.project.project_manager import ProjectManager
 from app.qc.context import QCCancelled, QCContext, sha
 from app.qc.issue_model import (
-    CATEGORY_GROUP, CheckerStatus, IgnoreRecord, IssueStatus, QCIssue, QCRun, QCScores, now_iso, sorted_issues,
+    CATEGORY_GROUP, CheckerState, CheckerStatus, IgnoreRecord, IssueStatus, QCIssue, QCRun, QCScores, now_iso, sorted_issues,
 )
 from app.qc.qc_engine import CHECKER_CATEGORIES, EngineResult, PreviousState, QCEngine, apply_ignores, refresh_fix_flags
 from app.qc.qc_history import RunComparison, compare_entries, entry_for
@@ -234,7 +234,10 @@ class QCService:
     def current_content_hash(self, p: Project | None = None) -> str:
         """Fingerprint of everything QC analyses, for the *live* project (no copy: only hashes are computed)."""
         p = p or self._project()
-        ctx = QCContext.build(p, detach=False)
+        return self._hash_of(QCContext.build(p, detach=False), p)
+
+    @staticmethod
+    def _hash_of(ctx: QCContext, p: Project) -> str:
         return sha([ctx.domain_hash(d) for d in ("timeline", "scenes", "transcript", "assets", "audio", "captions", "visual", "reference", "render")], ctx.basis_hash(), p.qc_settings.analysis_version())
 
     def run_full_qc(self, project_id: str | None = None, *, on_done: Callable[[QCRun], None] | None = None, on_error: Callable[[Job], None] | None = None, trigger: str = "manual",
@@ -262,6 +265,122 @@ class QCService:
             raise QCError(f"There is no QC check for “{category}”.")
         return self._start(p, selected, trigger="category", scope={"categories": [category], "scene_ids": []}, force=force, on_done=on_done, on_error=on_error)
 
+    # ------------------------------------------------------------------ incremental QC (only what the edits since the last run can have changed)
+    def run_incremental_qc(self, on_done: Callable[[QCRun], None] | None = None, on_error: Callable[[Job], None] | None = None) -> Job | None:
+        """Bring the findings up to date after edits. Returns ``None`` when the last complete run still matches the project (nothing to do, ``on_done`` is not called).
+
+        The outcome is the same as a full run: the engine re-uses a checker's findings (and a scene-local checker's per-scene findings) only when the hash of exactly the
+        inputs it reads is unchanged, and a run that could not verify some check is not recorded as current. The change tracker / stored fingerprints only decide how much
+        work is *expected* (logged as ``qc.incremental_selected``) and let the UI say which scenes are stale."""
+        p = self._project()
+        plan = self.plan_incremental()
+        log_event(_log, "qc.incremental_selected", **plan.summary(), total_scenes=len(p.scenes))
+        if plan.mode == "none":
+            return None
+        selected = self.engine.select(p.qc_settings)
+        return self._start(p, selected, trigger="incremental", scope={"categories": [], "scene_ids": [], "incremental": plan.summary()}, force=False, on_done=on_done, on_error=on_error)
+
+    def plan_incremental(self) -> IncrementalPlan:
+        p = self._project()
+        rec = p.qc_runs[-1] if p.qc_runs else None
+        live = QCContext.build(p, detach=False)  # hashes only: no copy of the project
+        cur = self._hash_of(live, p)
+        if rec and p.qc_scores is not None and rec.get("content_hash") and rec["content_hash"] == cur:
+            return IncrementalPlan("none", "The last QC run still matches the project.")
+        selected = self.engine.select(p.qc_settings)
+        base = self._baseline(p)
+        if rec is None or p.qc_scores is None:
+            return IncrementalPlan("full", "QC has not run yet.", "none", checkers_rerun=sorted(selected))
+        if base is None:
+            return IncrementalPlan("full", "The last run did not cover the whole project (or predates change tracking): every check runs, unchanged analysis is still re-used.", "none", checkers_rerun=sorted(selected))
+        domains, scenes, direct, all_scenes, source, unknown = self._changes_since(p, base, live)
+        if base.get("analysis") != p.qc_settings.analysis_version():
+            domains.append(D_QC_SETTINGS)
+        rerun, reused = self._expected_checkers(live, p, selected)
+        order = [s.id for s in live.scenes]
+        mode, reason = ("full", "A change was not understood, so nothing is assumed unchanged.") if unknown else ("incremental", "")
+        return IncrementalPlan(mode, reason, source, [s for s in order if all_scenes or s in scenes], [s for s in order if s in direct], sorted(set(domains)), all_scenes, rerun, reused)
+
+    def qc_staleness(self, exact: bool = False) -> dict[str, Any]:
+        """Which part of the latest QC result no longer matches the project: ``{stale, scene_ids, domains, reason, source}``. With a change tracker this is answered from the change
+        log (no hashing, safe to call on every edit); ``exact=True`` (or no usable log) compares content hashes, which is also what the export gate uses and what stays authoritative."""
+        p = self._project()
+        if not p.qc_runs or p.qc_scores is None:
+            return {"stale": True, "scene_ids": [], "domains": [], "reason": "QC has not run yet", "source": "none"}
+        rec = p.qc_runs[-1]
+        base = self._baseline(p)
+        if not rec.get("content_hash"):
+            return {"stale": True, "scene_ids": [], "domains": [], "reason": "The last QC run did not cover the whole project (scene / category run or canceled).", "source": "run"}
+        t = self.tracker
+        if base is not None and t is not None and not exact and base.get("epoch") == t.epoch and base.get("project_id") == p.project_id:
+            cs = t.peek(since=int(base.get("revision", 0)))
+            domains = sorted(cs.domains & set(QC_DOMAINS))
+            if base.get("analysis") != p.qc_settings.analysis_version():
+                domains.append(D_QC_SETTINGS)
+            order = [s.id for s in sorted(p.scenes, key=lambda s: s.start)]
+            scenes = order if cs.all_scenes else [s for s in order if s in cs.scene_ids]
+            stale = bool(domains or scenes)
+            return {"stale": stale, "scene_ids": scenes, "domains": domains, "reason": "The project changed since the last QC run." if stale else "", "source": "tracker", "unknown_change": cs.unknown}
+        stale = rec["content_hash"] != self.current_content_hash(p)
+        if not stale:
+            return {"stale": False, "scene_ids": [], "domains": [], "reason": "", "source": "hash"}
+        domains, scenes, _direct, all_scenes, _src, _unk = self._changes_since(p, base, QCContext.build(p, detach=False)) if base is not None else ([], set(), set(), True, "hash", False)
+        order = [s.id for s in sorted(p.scenes, key=lambda s: s.start)]
+        return {"stale": True, "scene_ids": order if all_scenes else [s for s in order if s in scenes], "domains": sorted(set(domains)), "reason": "The project changed since the last QC run.", "source": "hash"}
+
+    @staticmethod
+    def _baseline(p: Project) -> dict[str, Any] | None:
+        b = p.qc_cache.get(INCREMENTAL_KEY)
+        return b if isinstance(b, dict) and isinstance(b.get("domains"), dict) else None
+
+    @staticmethod
+    def _baseline_record(ctx: QCContext, project_id: str, revision: int, epoch: int) -> dict[str, Any]:
+        """What a complete run vouches for, compactly: one hash per domain and per scene (the scene hashes are already memoised when a scene-local checker ran)."""
+        return {"v": 1, "project_id": project_id, "revision": revision, "epoch": epoch, "analysis": ctx.settings.analysis_version(), "basis": ctx.basis_hash(),
+                "domains": {d: ctx.domain_hash(d) for d in HASH_DOMAINS}, "scenes": {s.id: ctx.scene_signature(s.id) for s in ctx.scenes}}
+
+    def _changes_since(self, p: Project, base: dict[str, Any], live: QCContext) -> tuple[list[str], set[str], set[str], bool, str, bool]:
+        """(domains, affected scenes incl. neighbours, direct scenes, all scenes, source, unknown). From the tracker when it has watched the project since the baseline, otherwise
+        by comparing the stored domain / scene fingerprints with the live project."""
+        t = self.tracker
+        if t is not None and base.get("epoch") == t.epoch and base.get("project_id") == p.project_id:
+            cs = t.peek(since=int(base.get("revision", 0)))
+            domains = [d for d in cs.domains if d in QC_DOMAINS]
+            # a hash that moved without the tracker having seen why means the log is incomplete: fall through to the exact comparison
+            moved = [d for d in HASH_DOMAINS if live.domain_hash(d) != base["domains"].get(d)]
+            if set(moved) <= set(cs.domains) or cs.all_scenes:
+                return domains, set(cs.scene_ids), set(cs.direct_scene_ids), cs.all_scenes, "tracker", cs.unknown
+        moved = [d for d in HASH_DOMAINS if live.domain_hash(d) != base["domains"].get(d)]
+        if live.basis_hash() != base.get("basis"):
+            moved.append(D_EDITING)
+        old = base.get("scenes") or {}
+        order = [s.id for s in live.scenes]
+        direct = {sid for sid in order if old.get(sid) != live.scene_signature(sid)} | {sid for sid in old if sid not in set(order)}
+        scenes = set(direct)
+        for i, sid in enumerate(order):
+            if sid in direct:
+                scenes.update(order[max(0, i - 1):i + 2])
+        return moved, scenes & set(order), direct & set(order), False, "fingerprints", False
+
+    def _expected_checkers(self, live: QCContext, p: Project, selected: set[str]) -> tuple[list[str], list[str]]:
+        """Which checkers the engine is expected to run again (their cached input hash differs from the live project's). Checkers that read other checkers' findings follow them."""
+        rerun: list[str] = []
+        for chk in self.engine.checkers:
+            if chk.id not in selected:
+                continue
+            entry = p.qc_cache.get(chk.id)
+            ok = bool(entry) and entry.get("version") == chk.version and entry.get("state") in ("DONE", "CACHED") and bool(entry.get("input_hash"))
+            if ok:
+                try:
+                    ok = entry["input_hash"] == (chk.input_hash(live) if not chk.uses_shared else entry["input_hash"])
+                except Exception:  # noqa: BLE001
+                    ok = False
+            if ok and chk.uses_shared and rerun:
+                ok = False  # reads the findings of the checkers before it, and some of those are about to change
+            if not ok:
+                rerun.append(chk.id)
+        return rerun, [c for c in selected if c not in rerun]
+
     def retry_failed_check(self, qc_run_id: str | None = None, category: str | None = None, *, on_done: Callable[[QCRun], None] | None = None,
                            on_error: Callable[[Job], None] | None = None) -> Job:
         """Run only the checks that failed (or the named one) and merge them into the same run, without restarting the others."""
@@ -288,6 +407,8 @@ class QCService:
         ignore_ids = {r.ignore_id for r in ignores}
         number = self._next_number(p) if not replace_run else next((int(r["number"]) for r in p.qc_runs if r["run_id"] == replace_run), self._next_number(p))
         run_id = replace_run or None
+        t0 = self.tracker
+        rev0, epoch0 = (t0.revision, t0.epoch) if t0 is not None else (0, -1)  # read before the snapshot: a change that lands later stays pending for the next run
         ctx = QCContext.build(p, ffmpeg=self.ffmpeg, probe=self.probe, scene_filter=scene_ids, rendered_file=rendered_file)  # detached snapshot (UI thread)
         ctx.ai_provider = self._ai_provider
         content_hash = self.current_content_hash(p)
@@ -312,6 +433,11 @@ class QCService:
             res = self.engine.run(ctx, previous=previous, ignores=ignores, selected=selected, trigger=trigger, number=number, scope=scope, progress=on_progress, use_cache=not force,
                                   run_id=run_id, project_version=version)
             res.run.content_hash = content_hash if res.complete else ""  # a run that left some checks on older findings (scene / category run, cancel) does not vouch for the whole project
+            if res.complete and not rendered_file:
+                try:
+                    res.cache[INCREMENTAL_KEY] = self._baseline_record(ctx, project_id, rev0, epoch0)
+                except Exception:  # noqa: BLE001  (the baseline only speeds up the next run; without it that run is simply a full one)
+                    _log.warning("QC baseline could not be recorded", exc_info=True)
             holder["r"] = res
             return res
 
@@ -320,6 +446,8 @@ class QCService:
             if cur is None or cur.project_id != project_id:
                 return
             self._install(cur, res, replace_run)
+            if res.complete and self.tracker is not None:
+                self.tracker.mark_clean("qc", rev0)
             if {r.ignore_id for r in cur.qc_ignored_issues} != ignore_ids:  # the user ignored / un-ignored something while the job was running: their decision wins over the snapshot's
                 for i in cur.qc_issues:
                     if i.ignored_by_user and i.status is IssueStatus.IGNORED:
@@ -328,7 +456,12 @@ class QCService:
                 self._recount(cur)
             self.progress = QCProgress("IDLE", 1.0, "Canceled" if canceled else "Done", "", res.run.checkers)
             self._publish("run_canceled" if canceled else "run_finished", run_id=res.run.run_id)
-            log_event(_log, "qc.run", run_id=res.run.run_id, state=res.run.state, overall=res.run.scores.overall, trigger=trigger)
+            extra = {}
+            if trigger == "incremental":
+                sts = list(res.run.checkers.values())
+                extra = {"checkers_run": sum(1 for c in sts if c.state in (CheckerState.DONE, CheckerState.FAILED)), "checkers_cached": sum(1 for c in sts if c.state is CheckerState.CACHED),
+                         "scenes_analyzed": sum(c.analyzed_scenes for c in sts), "scenes_reused": sum(c.reused_scenes for c in sts)}
+            log_event(_log, "qc.run", run_id=res.run.run_id, state=res.run.state, overall=res.run.scores.overall, trigger=trigger, **extra)
 
         def done(job: Job) -> None:
             res: EngineResult = job.result
@@ -350,7 +483,7 @@ class QCService:
             if on_error:
                 on_error(job)
 
-        title = {"scene": "Quality control — scene", "category": "Quality control — category", "retry": "Quality control — retry"}.get(trigger, "AI quality control")
+        title = {"scene": "Quality control — scene", "category": "Quality control — category", "retry": "Quality control — retry", "incremental": "Quality control — changes only"}.get(trigger, "AI quality control")
         job = self._jobs.submit("qc.run", work, title=title, on_complete=done, on_error=failed, on_cancel=cancelled)
         self._job = job
         self.progress.job_id = job.id
