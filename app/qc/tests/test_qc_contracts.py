@@ -372,3 +372,194 @@ def test_issue_factory_disables_auto_fix_for_protected_elements(proj):
     ctx.settings.fix_permissions["caption.retime"] = "never"
     off = chk.issue("caption.drift", QCCategory.SYNC, Severity.WARNING, "Drift", clip=ai, track=proj.timeline.get_track("track_v6"), fix=fc.caption_retime(ai.id, 8.1, 10.1, 0.1, ctx.settings), ctx=ctx)
     assert not off.auto_fix_available and "Disabled in QC settings" in off.fix_blocked_reason
+
+
+# ------------------------------------------------------------------ review round: stale caches, carried findings, gate semantics
+class CoverageFake(SceneFake):
+    """A scene-local checker whose answer depends on the project: a CRITICAL for every scene whose picture is shorter than the scene."""
+
+    def run(self, ctx, report):
+        self.runs += 1
+        ids = [s.id for s in ctx.target_scenes()]
+        self.seen.append(ids)
+        out = []
+        for sid in ids:
+            s = ctx.scene(sid)
+            if sum(c.duration for _t, c in ctx.visual_clips() if c.scene_id == sid) < (s.end - s.start) - 0.01:
+                i = issue(Severity.CRITICAL, "scene.uncovered", QCCategory.SCENE_COVERAGE, sid)
+                i.checker = "scene"
+                out.append(i)
+        return CheckerOutput(out, {})
+
+
+def test_a_scene_run_does_not_vouch_for_scenes_it_did_not_look_at(proj):
+    """Regression: a scene-only run stored the CURRENT hashes for every scene, so the next full run served the other scenes' OLD findings from the cache (a CRITICAL stayed hidden)."""
+    chk = CoverageFake()
+    eng = QCEngine([chk])
+    first = eng.run(qc_ctx(proj))
+    assert first.run.issues == [] and first.complete
+    proj.timeline.get_track("track_v1").clips[1].duration = 5.0  # scene 2 is now uncovered ...
+    scene_run = eng.run(qc_ctx(proj, scene_filter=[proj.s1.id]), previous=PreviousState(first.run.issues, first.cache))  # ... but QC only looked at scene 1
+    assert chk.seen[-1] == [proj.s1.id] and scene_run.run.issues == [] and not scene_run.complete  # the run says so: it is not a verdict on the whole project
+    full = eng.run(qc_ctx(proj), previous=PreviousState(scene_run.run.issues, scene_run.cache))
+    assert [(i.code, i.scene_id) for i in full.run.issues] == [("scene.uncovered", proj.s2.id)] and full.run.scores.status == "BLOCKED" and full.complete
+    assert chk.seen[-1] == [proj.s2.id]  # only the scene that was left behind is analysed, scene 1 is still reused
+
+
+class WithGlobal(CoverageFake):
+    def run(self, ctx, report):
+        out = super().run(ctx, report)
+        g = issue(Severity.NOTICE, "scene.global", QCCategory.SCENE_COVERAGE, None, start=None, end=None)
+        g.checker = "scene"
+        out.issues.append(g)
+        return out
+
+
+def test_a_scene_run_keeps_every_other_scenes_findings_even_when_a_global_finding_exists(proj):
+    proj.timeline.get_track("track_v1").clips[1].duration = 5.0
+    chk = WithGlobal()
+    eng = QCEngine([chk])
+    first = eng.run(qc_ctx(proj))
+    assert {(i.code, i.scene_id) for i in first.run.issues} == {("scene.global", None), ("scene.uncovered", proj.s2.id)}
+    again = eng.run(qc_ctx(proj, scene_filter=[proj.s1.id]), previous=PreviousState(first.run.issues, first.cache))
+    assert {(i.code, i.scene_id) for i in again.run.issues} == {("scene.global", None), ("scene.uncovered", proj.s2.id)}  # scene 2's CRITICAL is not dropped
+    assert again.complete  # nothing changed since the full run: the scene run is still a verdict on the whole project
+
+
+def test_findings_carried_over_keep_their_fixed_mark_but_a_redetected_one_reopens(proj):
+    chk = CoverageFake()
+    eng = QCEngine([chk])
+    proj.timeline.get_track("track_v1").clips[1].duration = 5.0
+    first = eng.run(qc_ctx(proj))
+    fixed = next(i for i in first.run.issues if i.scene_id == proj.s2.id)
+    fixed.status = IssueStatus.FIXED  # the user applied a fix to scene 2
+    carried = eng.run(qc_ctx(proj, scene_filter=[proj.s1.id]), previous=PreviousState(first.run.issues, first.cache))
+    assert [i.status for i in carried.run.issues] == [IssueStatus.FIXED] and carried.run.scores.counts["CRITICAL"] == 0  # not re-detected: still fixed
+    cached = eng.run(qc_ctx(proj), previous=PreviousState(carried.run.issues, carried.cache))
+    assert cached.run.checkers["scene"].state is CheckerState.CACHED and cached.run.issues[0].status is IssueStatus.FIXED
+    redetected = eng.run(qc_ctx(proj), previous=PreviousState(cached.run.issues, cached.cache), use_cache=False)
+    assert redetected.run.issues[0].status is IssueStatus.OPEN  # analysed again and still wrong: the fix did not resolve it
+
+
+def test_a_category_run_or_a_cancel_is_complete_only_while_the_rest_still_matches_the_project(proj):
+    t, c = Fake("timeline", [issue(Severity.WARNING, "t.1", QCCategory.TIMELINE)]), Fake("caption", cats=(QCCategory.CAPTION,))
+    eng = QCEngine([t, c])
+    full = eng.run(qc_ctx(proj))
+    same = eng.run(qc_ctx(proj), previous=PreviousState(full.run.issues, full.cache), selected={"caption"}, use_cache=False)
+    assert same.complete and "timeline" in same.cache  # the timeline result is still valid for this project: kept, with its cache entry
+    add_clip(proj, "track_v2", proj.a, 3, 2)
+    moved = eng.run(qc_ctx(proj), previous=PreviousState(same.run.issues, same.cache), selected={"caption"}, use_cache=False)
+    assert not moved.complete  # the timeline finding comes from before the edit: this run cannot vouch for the project
+    assert any(i.code == "t.1" for i in moved.run.issues)
+
+
+def test_a_canceled_run_reports_the_canceled_checks_as_not_completed(proj):
+    class Canceler(Fake):
+        def run(self, ctx, report):
+            ctx.cancel.set()
+            ctx.check_cancel()
+
+    a = Fake("timeline", [issue(Severity.WARNING, "t.1", QCCategory.TIMELINE)])
+    first = QCEngine([a, Fake("sync", cats=(QCCategory.SYNC,))]).run(qc_ctx(proj))
+    res = QCEngine([a, Canceler("sync", cats=(QCCategory.SYNC,))]).run(qc_ctx(proj), previous=PreviousState(first.run.issues, first.cache), use_cache=False)
+    assert res.run.state == "CANCELED" and res.run.failed_checkers() == ["sync"] and "sync" in res.run.scores.unavailable and res.run.record()["failed"] == ["sync"]
+    assert "sync" in res.cache and res.complete  # the sync result of the earlier run is still valid for the unchanged project and stays cached
+    add_clip(proj, "track_v2", proj.a, 3, 2)
+    stale = QCEngine([a, Canceler("sync", cats=(QCCategory.SYNC,))]).run(qc_ctx(proj), previous=PreviousState(first.run.issues, first.cache), use_cache=False)
+    assert not stale.complete
+
+
+def test_a_checker_switched_off_in_the_settings_loses_its_findings(proj):
+    t, c = Fake("timeline", [issue(Severity.WARNING, "t.1", QCCategory.TIMELINE)]), Fake("caption", [issue(Severity.ERROR, "c.1", QCCategory.CAPTION, None, start=None, end=None)], cats=(QCCategory.CAPTION,))
+    eng = QCEngine([t, c])
+    first = eng.run(qc_ctx(proj))
+    assert {i.code for i in first.run.issues} == {"t.1", "c.1"}
+    proj.qc_settings.enabled_checkers = [x for x in proj.qc_settings.enabled_checkers if x != "caption"]
+    second = eng.run(qc_ctx(proj), previous=PreviousState(first.run.issues, first.cache))
+    assert {i.code for i in second.run.issues} == {"t.1"} and second.run.checkers["caption"].state is CheckerState.SKIPPED and "caption" not in second.cache and second.complete
+
+
+def test_a_global_fact_every_checker_reads_invalidates_every_cache_entry(proj):
+    """Regression: the voice-over length (ctx.duration), the locks, the export resolution and the confidence filters were in no cache key, so a changed value was served from the cache."""
+    chk = Fake("timeline", [issue(Severity.WARNING, "t.1", QCCategory.TIMELINE)])
+    eng = QCEngine([chk])
+    first = eng.run(qc_ctx(proj))
+    for change in (lambda p: setattr(p.voice_over, "duration", 25.0), lambda p: p.timeline_generation.locked_scenes.append(p.s1.id),
+                   lambda p: setattr(p.render_settings, "resolution", "2160p"), lambda p: setattr(p.qc_settings, "min_confidence_to_report", 80.0),
+                   lambda p: setattr(p.qc_settings, "ai_confidence_caps", [[90.0, "INFO"]])):
+        runs = chk.runs
+        before = eng.run(qc_ctx(proj), previous=PreviousState(first.run.issues, first.cache))
+        assert before.run.checkers["timeline"].state is CheckerState.CACHED and chk.runs == runs
+        change(proj)
+        after = eng.run(qc_ctx(proj), previous=PreviousState(first.run.issues, first.cache))
+        assert after.run.checkers["timeline"].state is CheckerState.DONE and chk.runs == runs + 1
+        first = after
+
+
+def test_a_critical_issue_is_never_waved_through_by_an_ignore_record(proj):
+    crit, warn = issue(Severity.CRITICAL, "same.code", QCCategory.TIMELINE), issue(Severity.WARNING, "same.code", QCCategory.TIMELINE, "scene_002")
+    res = QCEngine([Fake("timeline", [crit, warn])]).run(qc_ctx(proj), ignores=[IgnoreRecord("t", "type", code="same.code", reason="intentional")])
+    by_sev = {i.severity: i for i in res.run.issues}
+    assert by_sev[Severity.WARNING].ignored_by_user and not by_sev[Severity.CRITICAL].ignored_by_user and res.run.scores.status == "BLOCKED" and res.run.scores.export == "BLOCKED"
+    proj.qc_issues = res.run.issues
+    IgnoreIssuesCommand(proj, IgnoreRecord("ig", "issue", crit.fingerprint)).do()
+    assert not next(i for i in proj.qc_issues if i.severity is Severity.CRITICAL).ignored_by_user
+
+
+def test_ready_never_sits_next_to_a_blocked_export_and_all_zero_weights_do_not_score_zero():
+    s = QCSettings()
+    s.block_level = BlockLevel.CRITICAL_ERROR_WARNING.value
+    sc = compute_scores([issue(Severity.WARNING, "w.1", QCCategory.PACING)], s, 120, 12)
+    assert sc.export == "BLOCKED" and sc.status == "REVIEW" and sc.overall >= 90  # the score is fine, the user's block level is not satisfied
+    z = QCSettings()
+    z.group_weights = {k: 0.0 for k in z.group_weights}
+    assert compute_scores([], z, 60, 12).status_label == "100/100 — Ready"
+
+
+def test_the_history_archive_and_noisy_runs_are_bounded(proj):
+    from app.project.phase8_commands import MAX_HISTORY_ISSUES, MAX_ISSUES
+
+    noisy = [issue(Severity.NOTICE, f"n.{k}", QCCategory.TIMELINE, None, start=float(k), end=float(k) + 1) for k in range(MAX_ISSUES + 50)]
+    for k, i in enumerate(noisy):
+        i.checker, i.fingerprint = "timeline", f"fp{k}"
+    res = QCEngine([Fake("timeline", noisy)]).run(qc_ctx(proj))
+    StoreQCRunCommand(proj, res.run.issues, res.run.scores, res.run.record(), res.run.history_entry([], []), res.cache).do()
+    assert len(proj.qc_issues) == MAX_ISSUES and len(proj.qc_history[-1]["issues"]) == MAX_HISTORY_ISSUES and proj.qc_history[-1]["issues_total"] == MAX_ISSUES + 50
+    assert "timeline" not in proj.qc_cache  # findings were cut: the cache must not vouch for them
+    json.dumps(proj.to_document(), allow_nan=False)  # still a valid, savable document
+
+
+def test_values_json_cannot_write_never_make_the_project_unsavable():
+    import numpy as np
+    from pathlib import Path
+
+    from app.qc.issue_model import clean_json
+
+    odd = {"n": np.int64(3), "f": np.float32(1.5), "s": {2, 1}, "p": Path("a/b"), "nan": float("nan"), "t": (1, 2), "sev": Severity.ERROR}
+    assert json.loads(json.dumps(clean_json(odd), allow_nan=False)) == {"n": 3, "f": 1.5, "s": [1, 2], "p": str(Path("a/b")), "nan": None, "t": [1, 2], "sev": "ERROR"}
+    i = issue()
+    i.metrics = {"count": np.int64(7)}
+    assert json.loads(json.dumps(i.to_dict(), allow_nan=False))["metrics"] == {"count": 7}
+
+
+class CaptionSceneFake(SceneFake):
+    """Scene-local, reads the project-wide caption settings and the frame size (neither belongs to a single scene)."""
+
+    domains = ("timeline", "scenes", "captions")
+
+
+def test_a_project_wide_value_re_analyses_every_scene_not_just_the_changed_ones(proj):
+    """Regression: with a changed caption margin or frame size every scene's own key was unchanged, so the scene-level reuse served the old findings of all scenes."""
+    chk = CaptionSceneFake()
+    eng = QCEngine([chk])
+    first = eng.run(qc_ctx(proj))
+    assert chk.seen == [[proj.s1.id, proj.s2.id]]
+    for change in (lambda p: setattr(p.caption_settings, "safe_margin_left", 0.3), lambda p: setattr(p.settings, "width", 1080), lambda p: setattr(p.settings, "fps", 24)):
+        change(proj)
+        chk.seen.clear()
+        again = eng.run(qc_ctx(proj), previous=PreviousState(first.run.issues, first.cache))
+        assert chk.seen == [[proj.s1.id, proj.s2.id]] and again.complete
+        first = again
+    chk.seen.clear()
+    quiet = eng.run(qc_ctx(proj), previous=PreviousState(first.run.issues, first.cache))
+    assert chk.seen == [] and quiet.run.checkers["scene"].state is CheckerState.CACHED

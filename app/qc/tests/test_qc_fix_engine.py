@@ -1109,3 +1109,32 @@ def test_a_sound_effect_over_speech_is_ducked_with_keyframes_and_handed_to_the_u
     assert dec.decision_id not in p.presentation_decisions
     ws.commands.undo()
     assert state_json(ws) == before
+
+
+def test_scores_follow_the_undo_and_redo_of_every_kind_of_fix(fws, tmp_path):
+    """Regression: a relink fix is one undo step with scope "assets", which the service ignored, so Ctrl+Z re-opened the issue but left the scores saying it was gone."""
+    from app.qc.scoring import compute_scores
+
+    ws, p = fws, fws.project
+    asset = add_asset(p, "clip.mp4", "video", duration=5)
+    path = p.asset_path(asset)
+    path.write_bytes(b"identical media bytes" * 100)
+    asset.content_hash, asset.size_bytes = sha256_file(path), path.stat().st_size
+    copy = tmp_path / "elsewhere" / "clip_copy.mp4"
+    copy.parent.mkdir()
+    copy.write_bytes(path.read_bytes())
+    path.unlink()
+    relink = issue(ws, "asset.missing", fc.asset_relink(asset.id, str(copy), True, p.qc_settings), category=QCCategory.ASSET)
+    relink.severity = Severity.ERROR
+    cap = add_caption(p, 5.0, scene=ws.s1)
+    retime = retime_issue(ws, cap, -0.2)
+    p.qc_runs, p.qc_scores = [{"run_id": "qcr_x", "number": 1, "failed": []}], compute_scores(p.qc_issues, p.qc_settings, 30.0, 2)
+    assert p.qc_scores.counts["ERROR"] == 1 and p.qc_scores.counts["WARNING"] == 1
+    for fixed, kind, key in ((relink, "ERROR", "assets"), (retime, "WARNING", "timeline")):
+        ws.qc.apply_fix(fixed.issue_id)
+        assert fixed.status is IssueStatus.FIXED and p.qc_scores.counts[kind] == 0, key
+        ws.undo()
+        assert fixed.status is IssueStatus.OPEN and p.qc_scores.counts[kind] == 1, key  # the scores follow Ctrl+Z at once
+        ws.redo()
+        assert fixed.status is IssueStatus.FIXED and p.qc_scores.counts[kind] == 0, key
+        ws.undo()

@@ -92,6 +92,8 @@ def decide_export(issues: list[QCIssue], level: "BlockLevel | str", allow_overri
 def compute_scores(issues: list[QCIssue], settings: QCSettings, total_duration: float, scene_count: int, failed_groups: list[str] | None = None, failed_checkers: list[str] | None = None) -> QCScores:
     groups = group_scores(issues, total_duration, scene_count, failed_groups)
     avail = {g: w for g, w in settings.group_weights.items() if g in groups and g not in (failed_groups or []) and w > 0}
+    if not avail:  # every weight is 0 (or negative): count the analysed groups equally instead of scoring a clean project 0
+        avail = {g: 1.0 for g in groups if g not in (failed_groups or [])}
     wsum = sum(avail.values())
     overall = round(sum(groups[g] * w for g, w in avail.items()) / wsum, 1) if wsum else 0.0
     c = counts(issues)
@@ -107,6 +109,8 @@ def compute_scores(issues: list[QCIssue], settings: QCSettings, total_duration: 
         status = "FIX_REQUIRED"
     if failed_groups and status == "READY":
         status = "REVIEW"  # a partial analysis is never "Ready"
+    if status == "READY" and decision.blocked:
+        status = "REVIEW"  # the user's block level stops the export on what is left (e.g. warnings): "Ready" next to "Export blocked" would contradict itself
     label = f"{overall:.0f}/100 — {STATUS_TEXT[status]}"
     if c["CRITICAL"]:
         label += f" ({c['CRITICAL']} critical)"

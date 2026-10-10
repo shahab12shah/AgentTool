@@ -9,6 +9,7 @@ installed back on the dispatcher thread by a small, non-undoable command that on
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from copy import deepcopy
@@ -31,12 +32,12 @@ from app.qc.context import QCContext, sha
 from app.qc.issue_model import (
     CATEGORY_GROUP, CheckerStatus, IgnoreRecord, IssueStatus, QCIssue, QCRun, QCScores, now_iso, sorted_issues,
 )
-from app.qc.qc_engine import CHECKER_CATEGORIES, EngineResult, PreviousState, QCEngine, refresh_fix_flags
+from app.qc.qc_engine import CHECKER_CATEGORIES, EngineResult, PreviousState, QCEngine, apply_ignores, refresh_fix_flags
 from app.qc.qc_history import RunComparison, compare_entries, entry_for
 from app.qc.report_generator import build_report
 from app.qc.scoring import ExportDecision, decide_export
 from app.qc.settings import QCSettings
-from app.qc.severity import Severity
+from app.qc.severity import Severity, parse_severity
 from app.rendering.ffmpeg_service import FFmpegService
 from app.rendering.probe import MediaProbeService
 
@@ -122,7 +123,7 @@ class QCService:
     def _on_project_changed(self, _topic: str, payload: dict) -> None:
         """Ctrl+Z / Ctrl+Shift+Z of an ignore, a fix or a settings change: scores follow at once (the undo stack publishes no QC event of its own)."""
         cmd = payload.get("command")
-        if payload.get("action") not in ("undo", "redo") or cmd is None or getattr(cmd, "scope", "") not in ("qc", "timeline", "editing"):
+        if payload.get("action") not in ("undo", "redo") or cmd is None or getattr(cmd, "scope", "") not in ("qc", "timeline", "editing", "assets"):  # "assets": a relink fix is one undo step with scope "assets"
             return
         p = self._projects.current
         if p is None or p.qc_scores is None or not p.qc_runs:
@@ -170,6 +171,32 @@ class QCService:
                 raise QCError(f"Auto-fix permission for “{k}” must be auto, confirm or never.")
         if s.visual.error_below > s.visual.warning_below:
             raise QCError("Visual accuracy: the error threshold must not be above the warning threshold.")
+        from app.qc.settings import ALL_CHECKERS  # noqa: PLC0415
+
+        def not_finite(v: Any) -> bool:
+            if isinstance(v, float):
+                return not math.isfinite(v)
+            if isinstance(v, dict):
+                return any(not_finite(x) for x in v.values())
+            if isinstance(v, (list, tuple)):
+                return any(not_finite(x) for x in v)
+            return False
+
+        if not_finite(s.to_dict()):
+            raise QCError("QC settings must be finite numbers.")
+        if any(c not in ALL_CHECKERS for c in s.enabled_checkers):
+            raise QCError("Unknown QC check in the list of enabled checks.")
+        if any(not (isinstance(w, (int, float)) and math.isfinite(w) and w >= 0) for w in s.group_weights.values()):
+            raise QCError("Score weights must be numbers of zero or more.")
+        try:
+            for threshold, cap in s.ai_confidence_caps:
+                if not math.isfinite(float(threshold)):
+                    raise ValueError(threshold)
+                parse_severity(cap)
+        except (TypeError, ValueError) as exc:
+            raise QCError("Confidence caps must be pairs of a confidence (0-100) and a severity.") from exc
+        if not (isinstance(s.min_confidence_to_report, (int, float)) and 0 <= s.min_confidence_to_report <= 100):
+            raise QCError("Hide AI judgements below confidence: choose a value between 0 and 100.")
 
     # ------------------------------------------------------------------ running
     def _previous_state(self, p: Project) -> PreviousState:
@@ -182,7 +209,7 @@ class QCService:
         """Fingerprint of everything QC analyses, for the *live* project (no copy: only hashes are computed)."""
         p = p or self._project()
         ctx = QCContext.build(p, detach=False)
-        return sha([ctx.domain_hash(d) for d in ("timeline", "scenes", "transcript", "assets", "audio", "captions", "visual", "reference", "render")], p.qc_settings.analysis_version())
+        return sha([ctx.domain_hash(d) for d in ("timeline", "scenes", "transcript", "assets", "audio", "captions", "visual", "reference", "render")], ctx.basis_hash(), p.qc_settings.analysis_version())
 
     def run_full_qc(self, project_id: str | None = None, *, on_done: Callable[[QCRun], None] | None = None, on_error: Callable[[Job], None] | None = None, trigger: str = "manual",
                     force: bool = False, rendered_file: Path | None = None) -> Job:
@@ -232,6 +259,7 @@ class QCService:
             raise QCError("Quality control is already running. Wait for it to finish or cancel it.")
         previous = self._previous_state(p)
         ignores = deepcopy(p.qc_ignored_issues)
+        ignore_ids = {r.ignore_id for r in ignores}
         number = self._next_number(p) if not replace_run else next((int(r["number"]) for r in p.qc_runs if r["run_id"] == replace_run), self._next_number(p))
         run_id = replace_run or None
         ctx = QCContext.build(p, ffmpeg=self.ffmpeg, probe=self.probe, scene_filter=scene_ids, rendered_file=rendered_file)  # detached snapshot (UI thread)
@@ -257,7 +285,7 @@ class QCService:
 
             res = self.engine.run(ctx, previous=previous, ignores=ignores, selected=selected, trigger=trigger, number=number, scope=scope, progress=on_progress, use_cache=not force,
                                   run_id=run_id, project_version=version)
-            res.run.content_hash = content_hash
+            res.run.content_hash = content_hash if res.complete else ""  # a run that left some checks on older findings (scene / category run, cancel) does not vouch for the whole project
             holder["r"] = res
             return res
 
@@ -266,6 +294,12 @@ class QCService:
             if cur is None or cur.project_id != project_id:
                 return
             self._install(cur, res, replace_run)
+            if {r.ignore_id for r in cur.qc_ignored_issues} != ignore_ids:  # the user ignored / un-ignored something while the job was running: their decision wins over the snapshot's
+                for i in cur.qc_issues:
+                    if i.ignored_by_user and i.status is IssueStatus.IGNORED:
+                        i.ignored_by_user, i.status, i.ignore_reason = False, IssueStatus.OPEN, ""
+                apply_ignores(cur.qc_issues, cur.qc_ignored_issues)
+                self._recount(cur)
             self.progress = QCProgress("IDLE", 1.0, "Canceled" if canceled else "Done", "", res.run.checkers)
             self._publish("run_canceled" if canceled else "run_finished", run_id=res.run.run_id)
             log_event(_log, "qc.run", run_id=res.run.run_id, state=res.run.state, overall=res.run.scores.overall, trigger=trigger)
@@ -389,6 +423,8 @@ class QCService:
         i = self.issue(issue_id)
         if scope not in ("issue", "type", "type_scene"):
             raise QCError("Ignore scope must be issue, type or type_scene.")
+        if i.severity is Severity.CRITICAL:
+            raise QCError("A critical issue cannot be ignored: fix it, or the export stays blocked.")
         rec = IgnoreRecord(f"ign_{sha(issue_id, now_iso())}", "type" if scope.startswith("type") else "issue", i.fingerprint, i.code, i.scene_id if scope == "type_scene" else None, reason, now_iso(), i.title)
         self._execute(IgnoreIssuesCommand(p, rec))
         self._recount(p)
@@ -476,6 +512,8 @@ class QCService:
         p = self._project()
         if not p.qc_runs:
             raise QCError("Run QC first.")
+        if qc_run_id is not None and qc_run_id != p.qc_runs[-1]["run_id"]:
+            raise QCError("Only the latest QC run has a full report (older runs keep their scores and a compact issue list: compare them instead).")
         scores = p.qc_scores or QCScores()
         rec = p.qc_runs[-1]
         scene_names = {s.id: f"Scene {s.label}" for s in p.scenes}
@@ -502,7 +540,10 @@ class QCService:
         return GateResult(decision, current, not current, msg)
 
     # ------------------------------------------------------------------ post-render QC (a second pass on the actual file)
-    def run_post_render_qc(self, render_id: str, output_path: Path, *, on_done: Callable[[dict[str, Any]], None] | None = None, on_error: Callable[[Job], None] | None = None) -> Job:
+    def run_post_render_qc(self, render_id: str, output_path: Path, *, snapshot: Any = None, on_done: Callable[[dict[str, Any]], None] | None = None,
+                           on_error: Callable[[Job], None] | None = None) -> Job:
+        """Inspect the rendered file. ``snapshot`` is the render's own frozen copy of the project: what the file is measured against (the project may have been edited, or the export
+        settings changed, while the render ran)."""
         from app.qc.render_checker import RenderedFileChecker  # noqa: PLC0415
 
         p = self._project()
@@ -510,8 +551,15 @@ class QCService:
         project_id = p.project_id
         from app.rendering.presets import output_size  # noqa: PLC0415
 
-        out_w, out_h = output_size(*ctx.canvas, p.render_settings.resolution)  # the export is scaled to the chosen resolution
-        expected = {"duration": ctx.duration, "width": out_w, "height": out_h, "fps": p.render_settings.fps or ctx.fps, "has_audio": bool(p.voice_over.asset_id or ctx.audio_clips())}
+        if snapshot is not None:
+            from app.rendering.models import has_audio_clips  # noqa: PLC0415
+
+            rs = snapshot.settings
+            out_w, out_h = output_size(snapshot.canvas_w, snapshot.canvas_h, rs.resolution)
+            expected = {"duration": snapshot.duration, "width": out_w, "height": out_h, "fps": rs.fps or snapshot.fps, "has_audio": bool(snapshot.voice_asset_id or has_audio_clips(snapshot))}
+        else:
+            out_w, out_h = output_size(*ctx.canvas, p.render_settings.resolution)  # the export is scaled to the chosen resolution
+            expected = {"duration": ctx.duration, "width": out_w, "height": out_h, "fps": p.render_settings.fps or ctx.fps, "has_audio": bool(p.voice_over.asset_id or ctx.audio_clips())}
         checker = RenderedFileChecker()
 
         def work(jc) -> dict[str, Any]:

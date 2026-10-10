@@ -24,14 +24,29 @@ def now_iso() -> str:
 
 
 def clean_json(value: Any) -> Any:
-    """Make a value safe for project.json: NaN / infinity (which json writes as invalid JSON) become None; nested containers are cleaned recursively."""
+    """Make a value safe for project.json: NaN / infinity (which json writes as invalid JSON) become None; nested containers are cleaned recursively; values json cannot
+    write at all (numpy numbers, sets, paths, enums ...) become plain numbers / lists / strings, so one odd metric can never make the whole project unsavable."""
+    if value is None or isinstance(value, (bool, str)):
+        return value
     if isinstance(value, float):
         return value if math.isfinite(value) else None
+    if isinstance(value, int):
+        return int(value)
     if isinstance(value, dict):
-        return {k: clean_json(v) for k, v in value.items()}
+        return {str(k): clean_json(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [clean_json(v) for v in value]
-    return value
+    if isinstance(value, (set, frozenset)):
+        return sorted((clean_json(v) for v in value), key=str)
+    if isinstance(value, Enum):
+        return clean_json(value.value)
+    item = getattr(value, "item", None)  # numpy scalars
+    if callable(item):
+        try:
+            return clean_json(item())
+        except (TypeError, ValueError):
+            pass
+    return str(value)
 
 
 def new_issue_id() -> str:
@@ -327,7 +342,8 @@ class QCRun:
     cache_hits: int = 0
 
     def failed_checkers(self) -> list[str]:
-        return [k for k, c in self.checkers.items() if c.state is CheckerState.FAILED]
+        """The checkers that did not complete (failed or canceled): their score groups are 'not analysed' and the export gate says so."""
+        return [k for k, c in self.checkers.items() if c.state in (CheckerState.FAILED, CheckerState.CANCELED)]
 
     def active_issues(self) -> list[QCIssue]:
         return [i for i in self.issues if i.active]

@@ -122,7 +122,7 @@ class Workspace:
         if not out.is_file() or project.project_id != job.record.project_id:
             return
         try:
-            self.qc.run_post_render_qc(render_id, out)
+            self.qc.run_post_render_qc(render_id, out, snapshot=getattr(getattr(job, "spec", None), "snapshot", None))  # measured against what was rendered, not the project as it is now
         except Exception:  # noqa: BLE001  (the second QC pass is advisory: it must never disturb the finished export)
             _log.warning("post-render QC could not start", exc_info=True)
 

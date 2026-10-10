@@ -38,12 +38,13 @@ class BaseChecker:
     # ------------------------------------------------------------------ cache keys
     def input_hash(self, ctx: QCContext) -> str:
         """Everything this checker's answer depends on. Equal hash => the previous result is still valid."""
-        return sha([ctx.domain_hash(d) for d in self.domains], ctx.settings.subset_hash(*self.settings_sections), self.id, self.version, ctx.shared_signature() if self.uses_shared else "")
+        return sha([ctx.domain_hash(d) for d in self.domains], ctx.settings.subset_hash(*self.settings_sections), self.id, self.version, ctx.shared_signature() if self.uses_shared else "",
+                   ctx.basis_hash())
 
     version: str = "1"  # bump when the checker's rules change (invalidates cached results)
 
     def scene_input_hash(self, ctx: QCContext, scene_id: str) -> str:
-        return sha(ctx.scene_signature(scene_id), ctx.settings.subset_hash(*self.settings_sections), self.id, self.version)
+        return sha(ctx.scene_signature(scene_id), ctx.settings.subset_hash(*self.settings_sections), self.id, self.version, ctx.basis_hash(), ctx.global_signature(self.domains))
 
     # ------------------------------------------------------------------ the work
     def run(self, ctx: QCContext, report: ProgressFn) -> CheckerOutput:  # pragma: no cover - overridden

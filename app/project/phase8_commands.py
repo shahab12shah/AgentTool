@@ -13,10 +13,12 @@ from app.core.commands import Command
 from app.project.project import Project
 from app.qc.issue_model import FixRecord, IgnoreRecord, IssueStatus, QCIssue, QCScores, clean_json
 from app.qc.settings import QCSettings
+from app.qc.severity import Severity
 
 MAX_RUNS = 100
 MAX_HISTORY = 30
 MAX_ISSUES = 3000  # the current findings are persisted with the project: keep the most severe if a run is extremely noisy
+MAX_HISTORY_ISSUES = 1000  # per archived run (30 are kept): enough to compare runs, small enough that a noisy project does not grow project.json by tens of megabytes
 
 
 class StoreQCRunCommand(Command):
@@ -29,7 +31,15 @@ class StoreQCRunCommand(Command):
     def __init__(self, project: Project, issues: list[QCIssue], scores: QCScores, record: dict[str, Any], history: dict[str, Any], cache: dict[str, Any],
                  replace_run_id: str = "") -> None:
         self.project = project
-        keep = sorted(issues, key=lambda i: i.sort_key)[:MAX_ISSUES]
+        ordered = sorted(issues, key=lambda i: i.sort_key)
+        keep = ordered[:MAX_ISSUES]
+        history = dict(history)
+        if len(history.get("issues") or []) > MAX_HISTORY_ISSUES:  # the archive keeps the most severe (the list arrives sorted); the true total stays visible
+            history["issues_total"] = len(history["issues"])
+            history["issues"] = list(history["issues"])[:MAX_HISTORY_ISSUES]
+        cache = dict(cache)
+        for cid in {i.checker for i in ordered[MAX_ISSUES:]}:  # findings were cut: a cache entry that vouches for them would hide them for good, so that checker analyses again next time
+            cache.pop(cid, None)
         self.issues, self.scores, self.record, self.history, self.cache = deepcopy(keep), deepcopy(scores), clean_json(deepcopy(record)), clean_json(deepcopy(history)), clean_json(deepcopy(cache))
         self.replace_run_id = replace_run_id  # a retry of one checker updates its own run in place
         self._old: dict[str, Any] = {}
@@ -67,7 +77,7 @@ class IgnoreIssuesCommand(Command):
         p.qc_ignored_issues.append(deepcopy(self.record))
         self._marked = []
         for i in p.qc_issues:
-            if self.record.matches(i) and not i.ignored_by_user:
+            if self.record.matches(i) and not i.ignored_by_user and i.severity is not Severity.CRITICAL:  # a CRITICAL is never ignorable
                 self._marked.append((i.issue_id, i.status, i.ignored_by_user, i.ignore_reason))
                 i.ignored_by_user = True
                 i.status = IssueStatus.IGNORED

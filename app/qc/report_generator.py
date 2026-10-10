@@ -50,7 +50,7 @@ def build_report(project_name: str, record: dict[str, Any], scores: QCScores, is
     out += ["## Project", f"- Name: {project_name}", f"- Project version: {record.get('project_version', '—')} · timeline version {record.get('timeline_version', 0)}", ""]
     out += ["## QC run", f"- Run #{record.get('number', '?')} ({record.get('trigger', 'manual')}) · {record.get('finished_at') or record.get('created_at', '')}",
             f"- State: {record.get('state', 'COMPLETED')} · {record.get('seconds', 0):.1f} s" + (f" · {record.get('cache_hits', 0)} cached check(s)" if record.get("cache_hits") else "")]
-    failed = [k for k, v in (record.get("checkers") or {}).items() if v.get("state") == "FAILED"]
+    failed = [k for k, v in (record.get("checkers") or {}).items() if v.get("state") in ("FAILED", "CANCELED")]
     if failed:
         out.append(f"- **Checks that did not complete:** {', '.join(failed)} (their results are missing, not clean)")
     out.append("")

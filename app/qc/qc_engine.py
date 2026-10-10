@@ -20,7 +20,7 @@ from app.qc.issue_model import (
 )
 from app.qc.scoring import compute_scores
 from app.qc.settings import QCSettings
-from app.qc.severity import cap_for_confidence
+from app.qc.severity import Severity, cap_for_confidence
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +98,7 @@ class EngineResult:
     run: QCRun
     cache: dict[str, Any]
     outputs: dict[str, CheckerOutput] = field(default_factory=dict)
+    complete: bool = True  # every enabled checker's findings were verified against the project as it is now (a scene / category run, a retry or a cancel may leave some unverified)
 
 
 def classify(issue: QCIssue, settings: QCSettings) -> QCIssue:
@@ -129,6 +130,8 @@ def refresh_fix_flags(issue: QCIssue, settings: QCSettings) -> None:
 
 def apply_ignores(issues: list[QCIssue], ignores: list[IgnoreRecord]) -> None:
     for i in issues:
+        if i.severity is Severity.CRITICAL:
+            continue  # a CRITICAL can never be waved through (not even by an "ignore this type" recorded for a milder finding of the same kind)
         rec = next((r for r in ignores if r.matches(i)), None)
         if rec is not None:
             i.ignored_by_user, i.status, i.ignore_reason = True, IssueStatus.IGNORED, rec.reason
@@ -181,6 +184,22 @@ class QCEngine:
         prev_by_checker: dict[str, list[QCIssue]] = {}
         for i in previous.issues:
             prev_by_checker.setdefault(i.checker, []).append(i)
+        enabled = self.select(settings)  # what the settings switch on; a checker the user switched off keeps no findings
+        carried = {id(i) for i in previous.issues}  # findings re-used from the previous run (not detected again): their FIXED / ignored marks must survive
+        unverified: set[str] = set()  # enabled checkers whose findings still come from an earlier state of the project
+
+        def keep_previous(cid: str) -> None:
+            """A checker that did not run keeps its last findings and cache entry; the run is only 'current' if those are still valid for this project."""
+            collected.extend(prev_by_checker.get(cid, []))
+            entry = previous.cache.get(cid)
+            if entry:
+                new_cache[cid] = entry
+                outputs[cid] = CheckerOutput(list(prev_by_checker.get(cid, [])), dict(entry.get("metrics") or {}))
+                ctx.shared[cid] = outputs[cid]
+            if cid in enabled and not self._verified(chk_by_id[cid], ctx, previous):
+                unverified.add(cid)
+
+        chk_by_id = {c.id: c for c in self.checkers}
 
         def say(msg: str) -> None:
             run.log.append(msg)
@@ -196,16 +215,14 @@ class QCEngine:
             st = statuses[chk.id]
             if canceled:
                 st.state, st.message = CheckerState.CANCELED, "Canceled"
-                collected += prev_by_checker.get(chk.id, [])  # an unreached checker keeps what the last run found
+                keep_previous(chk.id)  # an unreached checker keeps what the last run found
                 continue
             if chk.id not in selected:
-                st.state, st.message = CheckerState.SKIPPED, "Not part of this run"
-                collected += prev_by_checker.get(chk.id, [])
-                prev_entry = previous.cache.get(chk.id)
-                if prev_entry:
-                    new_cache[chk.id] = prev_entry
-                    outputs[chk.id] = CheckerOutput(list(prev_by_checker.get(chk.id, [])), dict(prev_entry.get("metrics") or {}))
-                    ctx.shared[chk.id] = outputs[chk.id]
+                if chk.id in enabled:
+                    st.state, st.message = CheckerState.SKIPPED, "Not part of this run"
+                    keep_previous(chk.id)
+                else:
+                    st.state, st.message = CheckerState.SKIPPED, "Switched off in the QC settings"  # its old findings would never be refreshed: they go
                 done_w += chk.weight
                 tick(0.0, f"{st.label}: skipped", 0.0)
                 continue
@@ -221,7 +238,9 @@ class QCEngine:
             started = time.monotonic()
             try:
                 ctx.check_cancel()
-                out, _reused = self._run_one(chk, ctx, previous, prev_by_checker.get(chk.id, []), use_cache, st, lambda f, m: tick(f, f"{st.label}: {m}" if m else st.label, chk.weight))
+                out, partial = self._run_one(chk, ctx, previous, prev_by_checker.get(chk.id, []), use_cache, st, lambda f, m: tick(f, f"{st.label}: {m}" if m else st.label, chk.weight))
+                if partial:
+                    unverified.add(chk.id)
                 for i in out.issues:
                     i.checker = chk.id  # the engine owns attribution (cache reuse and "retry this checker" rely on it)
                 outputs[chk.id] = out
@@ -242,7 +261,7 @@ class QCEngine:
             except QCCancelled:
                 st.state, st.message = CheckerState.CANCELED, "Canceled"
                 canceled = True
-                collected += prev_by_checker.get(chk.id, [])
+                keep_previous(chk.id)
                 say(f"{st.label}: canceled")
             except Exception as exc:  # noqa: BLE001  (a failing checker never fails the run)
                 st.state, st.error = CheckerState.FAILED, f"{type(exc).__name__}: {exc}"
@@ -253,7 +272,7 @@ class QCEngine:
             done_w += chk.weight
             tick(1.0, st.message or st.label, 0.0)
 
-        issues = self._aggregate(collected, ctx, previous, ignores or [], run.run_id)
+        issues = self._aggregate(collected, ctx, previous, ignores or [], run.run_id, carried)
         failed_groups, failed_ids = self._failed_groups(statuses, previous)
         run.issues = issues
         run.scores = compute_scores(issues, settings, ctx.duration, len(ctx.project.scenes), failed_groups, failed_ids)
@@ -261,30 +280,67 @@ class QCEngine:
         run.state = "CANCELED" if canceled else "PARTIAL" if failed_ids or any(s.state is CheckerState.CANCELED for s in statuses.values()) else "COMPLETED"
         run.seconds = time.monotonic() - t0
         run.finished_at = now_iso()
-        return EngineResult(run, new_cache, outputs)
+        return EngineResult(run, new_cache, outputs, complete=not unverified)
 
     # ------------------------------------------------------------------ one checker (cache / scene-level reuse / full)
+    @staticmethod
+    def _verified(chk: BaseChecker, ctx: QCContext, previous: PreviousState) -> bool:
+        """True when the checker's last result was computed from exactly the project (and settings) QC is looking at now."""
+        entry = previous.cache.get(chk.id)
+        if not entry or entry.get("version") != chk.version or entry.get("state") not in ("DONE", "CACHED") or not entry.get("input_hash"):
+            return False
+        try:
+            return entry["input_hash"] == chk.input_hash(ctx)
+        except Exception:  # noqa: BLE001  (a key that cannot be computed verifies nothing)
+            return False
+
     def _run_one(self, chk: BaseChecker, ctx: QCContext, previous: PreviousState, prev_issues: list[QCIssue], use_cache: bool, st: CheckerStatus,
                  report: Callable[[float, str], None]) -> tuple[CheckerOutput, bool]:
+        """(output, partial). ``partial``: only some scenes were analysed and the rest keep findings that may be out of date (a scene run after other scenes changed): the cache
+        entry is then stored as *not valid for this project* and the run is not 'current', so the next full run re-analyses what was left."""
         entry = previous.cache.get(chk.id) if use_cache else None
         valid_entry = bool(entry and entry.get("version") == chk.version and entry.get("state") in ("DONE", "CACHED"))
         full_hash = chk.input_hash(ctx)
         st.input_hash = full_hash
         explicit_scenes = ctx.scene_filter is not None and chk.scene_local
-        if valid_entry and entry["input_hash"] == full_hash and not explicit_scenes:
+        same_inputs = bool(valid_entry and entry["input_hash"] == full_hash)  # type: ignore[index]
+        if same_inputs and not explicit_scenes:
             st.state = CheckerState.CACHED
-            return CheckerOutput(list(prev_issues), dict(entry.get("metrics") or {})), True
+            return CheckerOutput(list(prev_issues), dict(entry.get("metrics") or {})), False  # type: ignore[union-attr]
         if chk.scene_local and (valid_entry or explicit_scenes):
             scenes = [s.id for s in ctx.scenes]
             hashes = {sid: chk.scene_input_hash(ctx, sid) for sid in scenes}
-            st.scene_hashes = hashes
-            old = (entry or {}).get("scene_hashes") or {}
+            st.scene_hashes = dict(hashes)
+            old = (entry or {}).get("scene_hashes") or {} if valid_entry else {}
+            global_prev = [i for i in prev_issues if not i.scene_id]
             if explicit_scenes:
                 changed = {sid for sid in ctx.scene_filter if sid in hashes}  # type: ignore[union-attr]
-            else:
-                changed = {sid for sid, h in hashes.items() if old.get(sid) != h}
-            global_prev = [i for i in prev_issues if not i.scene_id]
-            if (valid_entry or explicit_scenes) and not global_prev and changed != set(scenes) and (old or explicit_scenes):
+                covers_all = changed == set(scenes)
+                # scenes this run does not look at but whose inputs differ from what the cache was built on keep OLD findings: remember that they are out of date
+                stale = set() if (same_inputs or covers_all) else {sid for sid, h in hashes.items() if sid not in changed and old.get(sid) != h}
+                partial = bool(stale) or (bool(global_prev) and not same_inputs and not covers_all)
+                saved = ctx.scene_filter
+                ctx.scene_filter = set(changed)
+                try:
+                    out = chk.run(ctx, report)
+                finally:
+                    ctx.scene_filter = saved
+                fresh_global = [i for i in out.issues if not i.scene_id]
+                seen = {i.fingerprint for i in fresh_global if i.fingerprint}
+                keep = [i for i in prev_issues if i.scene_id in hashes and i.scene_id not in changed]
+                if not covers_all:
+                    keep += [i for i in global_prev if i.fingerprint not in seen]  # a scene run cannot re-judge what spans the whole project: those findings stay as they were
+                st.reused_scenes, st.analyzed_scenes = len(scenes) - len(changed), len(changed)
+                merged = CheckerOutput(keep + [i for i in out.issues if i.scene_id in changed or not i.scene_id], {**(entry or {}).get("metrics", {}), **out.metrics},
+                                       list(out.notes) + [f"re-analysed {len(changed)} of {len(scenes)} scenes"], out.complete)
+                if partial:
+                    st.input_hash = ""  # never equal to a real key: the entry does not vouch for the whole project
+                    for sid in stale:
+                        st.scene_hashes[sid] = ""
+                st.state = CheckerState.DONE
+                return merged, partial
+            changed = {sid for sid, h in hashes.items() if old.get(sid) != h}
+            if valid_entry and not global_prev and changed != set(scenes) and old:
                 saved = ctx.scene_filter
                 ctx.scene_filter = set(changed)
                 try:
@@ -293,9 +349,8 @@ class QCEngine:
                     ctx.scene_filter = saved
                 keep = [i for i in prev_issues if i.scene_id in hashes and i.scene_id not in changed]
                 st.reused_scenes, st.analyzed_scenes = len(scenes) - len(changed), len(changed)
-                merged = CheckerOutput(keep + [i for i in out.issues if i.scene_id in changed or not i.scene_id], dict(out.metrics), list(out.notes) + [f"re-analysed {len(changed)} of {len(scenes)} scenes"], out.complete)
-                if not explicit_scenes or entry:
-                    merged.metrics = {**(entry or {}).get("metrics", {}), **out.metrics}
+                merged = CheckerOutput(keep + [i for i in out.issues if i.scene_id in changed or not i.scene_id], {**(entry or {}).get("metrics", {}), **out.metrics},
+                                       list(out.notes) + [f"re-analysed {len(changed)} of {len(scenes)} scenes"], out.complete)
                 st.state = CheckerState.DONE
                 return merged, False
             st.analyzed_scenes = len(scenes)
@@ -305,15 +360,15 @@ class QCEngine:
         return out, False
 
     # ------------------------------------------------------------------ aggregation
-    def _aggregate(self, issues: list[QCIssue], ctx: QCContext, previous: PreviousState, ignores: list[IgnoreRecord], run_id: str) -> list[QCIssue]:
+    def _aggregate(self, issues: list[QCIssue], ctx: QCContext, previous: PreviousState, ignores: list[IgnoreRecord], run_id: str, carried: set[int] | None = None) -> list[QCIssue]:
         settings = ctx.settings
         out: list[QCIssue] = []
         for i in issues:
             if i.confidence < settings.min_confidence_to_report and (i.detection_source.startswith("ai:") or i.confidence < 99.5):
                 continue  # too uncertain to say anything
             i.run_id = run_id
-            if i.status in (IssueStatus.FIXED, IssueStatus.OBSOLETE):
-                i.status = IssueStatus.OPEN  # detected again: the earlier fix did not resolve it
+            if i.status in (IssueStatus.FIXED, IssueStatus.OBSOLETE) and id(i) not in (carried or ()):
+                i.status = IssueStatus.OPEN  # detected again by an analysis that ran: the earlier fix did not resolve it (a finding merely carried over keeps its mark)
             if i.status is IssueStatus.IGNORED and not i.ignored_by_user:
                 i.status = IssueStatus.OPEN
             i.ignored_by_user, i.ignore_reason = False, ""

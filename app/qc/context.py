@@ -314,6 +314,43 @@ class QCContext:
         p = self.project
         return self.memo("h.render", lambda: sha(p.render_settings, p.settings, p.proxies, p.timeline_generation.version if hasattr(p.timeline_generation, "version") else 0))
 
+    def basis_hash(self) -> str:
+        """Global facts that most checkers read without a domain of their own, so every checker's cache key and every scene's key covers them: the narration (the master clock: its
+        asset and length), which scenes / decisions are locked (they decide what may be fixed), the editing brief per scene, the editing style, the export resolution and how findings are filtered / capped by confidence."""
+        def calc() -> str:
+            p = self.project
+            briefs = {sid: [bool(getattr(b, "keep_static", False)), bool(getattr(b, "evidence_treatment_needed", False))]
+                      for sid, b in (getattr(p.editing_strategy, "briefs", None) or {}).items()} if p.editing_strategy else {}
+            return sha(p.voice_over.asset_id, p.voice_over.duration, self.duration, sorted(self.locked_scene_ids()),
+                       sorted(d.decision_id for d in p.editing_decisions.values() if getattr(d, "locked", False)),
+                       sorted(d.decision_id for d in p.presentation_decisions.values() if getattr(d, "locked", False)),
+                       briefs, str(getattr(p.editing_settings, "style", "")), p.render_settings.resolution,
+                       self.settings.min_confidence_to_report, self.settings.ai_confidence_caps)  # the last two filter / cap what a checker returns: cached findings were cut with the old values
+
+        return self.memo("h.basis", calc)
+
+    def global_signature(self, domains: Iterable[str]) -> str:
+        """The part of a checker's inputs that belongs to NO single scene (the frame size and rate, the caption settings and styles, the visual preferences ...). A scene's own key
+        must cover it too, otherwise a changed global value leaves every scene 'unchanged' and the old findings are re-used."""
+        ds = set(domains)
+        p = self.project
+
+        def calc() -> str:
+            parts: list[Any] = [self.canvas, self.fps]
+            if "captions" in ds:
+                parts += [p.caption_settings, p.caption_styles]
+            if "visual" in ds:
+                parts.append(p.visual_preferences)
+            if "audio" in ds:
+                parts.append(self.audio_hash())
+            if "reference" in ds:
+                parts.append(self.reference_hash())
+            if "render" in ds:
+                parts.append(self.render_hash())
+            return sha(*parts)
+
+        return self.memo("h.global." + ",".join(sorted(ds)), calc)
+
     def domain_hash(self, domain: str) -> str:
         fn = {"timeline": self.timeline_hash, "scenes": self.scenes_hash, "transcript": self.transcript_hash, "assets": self.assets_hash, "audio": self.audio_hash,
               "captions": self.captions_hash, "visual": self.visual_hash, "reference": self.reference_hash, "render": self.render_hash}.get(domain)

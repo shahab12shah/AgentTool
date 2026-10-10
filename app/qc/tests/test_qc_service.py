@@ -12,7 +12,8 @@ import pytest
 from app.core.events import Topics
 from app.qc.checker_base import BaseChecker, CheckerOutput
 from app.qc.errors import QCError
-from app.qc.issue_model import CheckerState, IssueStatus, QCCategory, QCIssue
+from app.project.phase8_commands import MarkIssueFixedCommand
+from app.qc.issue_model import CheckerState, FixRecord, IssueStatus, QCCategory, QCIssue
 from app.qc.qc_engine import QCEngine
 from app.qc.severity import Severity
 from app.qc.tests.qc_helpers import add_asset, add_clip, add_scene, narrate
@@ -312,3 +313,193 @@ def test_no_project_gives_a_clear_error(ws):
 
 
 _ = CheckerState
+
+
+# ------------------------------------------------------------------ review round: partial runs, ignores, settings, older documents
+class CoverageChk(BaseChecker):
+    """Scene-local: a CRITICAL for every scene whose V1 pictures are shorter than the scene (it reads the project, so a stale cache entry shows)."""
+
+    domains = ("timeline", "scenes")
+    scene_local = True
+
+    def __init__(self, cid="scene", gate: threading.Event | None = None, release: threading.Event | None = None, severity=Severity.CRITICAL):
+        self.id, self.label, self.categories, self.runs, self.gate, self.release, self.severity = cid, cid, (QCCategory.SCENE_COVERAGE,), 0, gate, release, severity
+
+    def run(self, ctx, report):
+        self.runs += 1
+        if self.gate is not None:
+            self.gate.set()
+            assert self.release.wait(10)
+            ctx.check_cancel()
+        out = []
+        for s in ctx.target_scenes():
+            if sum(c.duration for _t, c in ctx.visual_clips() if c.scene_id == s.id) < (s.end - s.start) - 0.01:
+                out.append(self.issue("scene.uncovered", QCCategory.SCENE_COVERAGE, self.severity, "Uncovered", scene_id=s.id, start=s.start, end=s.end, ctx=ctx))
+        return CheckerOutput(out, {})
+
+
+def test_a_scene_run_never_hides_a_problem_in_another_scene_from_the_gate_or_the_next_full_run(qws):
+    ws = qws
+    ws.qc.engine = QCEngine([CoverageChk()])
+    run_qc(ws)
+    assert ws.qc.export_gate().run_current and not ws.qc.export_gate().blocked
+    ws.project.timeline.get_track("track_v1").clips[1].duration = 5.0  # scene 2 breaks; QC is asked about scene 1 only
+    ws.qc.run_scene_qc(ws.s1.id)
+    assert ws.jobs.wait_idle(30)
+    g = ws.qc.export_gate()
+    assert not g.run_current and g.needs_run and ws.project.qc_runs[-1]["content_hash"] == ""  # the scene run is not a verdict on the project
+    run_qc(ws)
+    assert [(i.code, i.scene_id) for i in ws.project.qc_issues] == [("scene.uncovered", ws.s2.id)]  # the full run really looks at scene 2
+    g2 = ws.qc.export_gate()
+    assert g2.run_current and g2.blocked
+
+
+def test_a_scene_run_after_a_fix_keeps_the_other_scenes_fixed_marks(qws):
+    ws = qws
+    ws.project.timeline.get_track("track_v1").clips[1].duration = 5.0
+    ws.qc.engine = QCEngine([CoverageChk()])
+    run_qc(ws)
+    issue = ws.project.qc_issues[0]
+    ws.commands.execute(MarkIssueFixedCommand(ws.project, issue.issue_id, FixRecord("f1", issue.issue_id, issue.code, "gap.close")))
+    ws.qc._recount(ws.project)  # what QCService.apply_fix does after a fix
+    assert issue.status is IssueStatus.FIXED and ws.project.qc_scores.counts["CRITICAL"] == 0
+    ws.qc.run_scene_qc(ws.s1.id)
+    assert ws.jobs.wait_idle(30)
+    assert [i.status for i in ws.project.qc_issues] == [IssueStatus.FIXED] and ws.project.qc_scores.counts["CRITICAL"] == 0  # carried over, not re-opened
+
+
+def test_cancel_is_not_a_verdict_and_the_gate_says_the_check_did_not_complete(qws):
+    ws = qws
+    started, release = threading.Event(), threading.Event()
+    sync = CoverageChk("sync", started, release)
+    sync.gate = None
+    ws.qc.engine = QCEngine([Fake("timeline"), sync])
+    run_qc(ws)
+    assert ws.qc.export_gate().run_current
+    sync.gate, sync.release = started, release
+    ws.project.timeline.get_track("track_v1").clips[1].duration = 5.0
+    job = ws.qc.run_full_qc()
+    assert started.wait(10) and ws.qc.cancel()
+    release.set()
+    assert ws.jobs.wait_idle(30) and job.status.value == "CANCELLED"
+    rec = ws.project.qc_runs[-1]
+    assert rec["state"] == "CANCELED" and rec["failed"] == ["sync"] and not ws.qc.export_gate().run_current  # the canceled check would have found the broken scene
+    assert "sync" in ws.project.qc_scores.unavailable
+
+
+def test_a_critical_issue_cannot_be_ignored_but_a_milder_one_of_the_same_kind_can(qws):
+    ws = qws
+    ws.qc.engine = QCEngine([Fake("timeline", [mk(Severity.CRITICAL, "t.same", scene=ws.s1.id), mk(Severity.WARNING, "t.same", scene=ws.s2.id)])])
+    run_qc(ws)
+    crit = next(i for i in ws.project.qc_issues if i.severity is Severity.CRITICAL)
+    warn = next(i for i in ws.project.qc_issues if i.severity is Severity.WARNING)
+    with pytest.raises(QCError, match="critical"):
+        ws.qc.ignore_issue(crit.issue_id, "I know")
+    ws.qc.ignore_type(warn.issue_id, "the same kind, on purpose")
+    assert warn.ignored_by_user and not crit.ignored_by_user and ws.project.qc_scores.counts["CRITICAL"] == 1 and ws.qc.export_gate().blocked
+    run_qc(ws, force=True)
+    assert [i.ignored_by_user for i in sorted(ws.project.qc_issues, key=lambda i: i.severity.value)] == [False, True] and ws.qc.export_gate().blocked
+
+
+def test_an_ignore_made_while_the_run_is_in_flight_survives_the_install(qws):
+    ws = qws
+    started, release = threading.Event(), threading.Event()
+    chk = CoverageChk("scene", severity=Severity.WARNING)
+    ws.project.timeline.get_track("track_v1").clips[1].duration = 5.0
+    ws.qc.engine = QCEngine([chk])
+    run_qc(ws)
+    issue = ws.project.qc_issues[0]
+    chk.gate, chk.release = started, release
+    ws.qc.run_full_qc(force=True)
+    assert started.wait(10)
+    ws.qc.ignore_issue(issue.issue_id, "decided while QC was running")  # the user acts on the old findings while the job works on its snapshot
+    release.set()
+    assert ws.jobs.wait_idle(30)
+    [now] = ws.project.qc_issues
+    assert now.ignored_by_user and now.status is IssueStatus.IGNORED and ws.project.qc_scores.counts["WARNING"] == 0
+
+
+def test_only_the_latest_run_has_a_full_report_and_settings_are_validated(qws):
+    ws = qws
+    ws.qc.engine = QCEngine([Fake("timeline", [mk(Severity.WARNING, "t.w")])])
+    run_qc(ws)
+    first = ws.project.qc_runs[-1]["run_id"]
+    run_qc(ws, force=True)
+    assert "Run #2" in ws.qc.report() and ws.qc.report(ws.project.qc_runs[-1]["run_id"]) == ws.qc.report()
+    with pytest.raises(QCError, match="latest"):
+        ws.qc.report(first)
+    for bad in ({"enabled_checkers": ["nonsense"]}, {"group_weights": {"audio": -1.0}}, {"group_weights": {"audio": float("nan")}}, {"ai_confidence_caps": [[50.0, "BAD"]]},
+                {"min_confidence_to_report": 140.0}, {"caption.max_cps": float("inf")}, {"sync.minor_ms": float("nan")}):
+        with pytest.raises(QCError):
+            ws.qc.update_settings(**bad)
+
+
+@pytest.mark.parametrize("version", [7, 6, 5, 4, 3, 2, 1])
+def test_a_document_saved_before_phase_8_opens_with_empty_qc_sections_and_saves_as_schema_8(qws, version):
+    from app.project import project_schema as ps
+    from app.storage.paths import ProjectPaths
+
+    ws = qws
+    ws.save()
+    root = ws.project.root
+    f = ProjectPaths(root).project_file
+    doc = json.loads(f.read_text(encoding="utf-8"))
+    qc_keys = ("qc_settings", "qc_runs", "qc_issues", "qc_scores", "qc_ignored_issues", "qc_fixes", "qc_history", "qc_cache", "render_qc_results")
+    drop = set(qc_keys)
+    for limit, section in ((6, ps._V7_SECTIONS), (5, ps._V6_SECTIONS), (4, ps._V5_SECTIONS), (3, ps._V4_SECTIONS), (2, ps._V3_SECTIONS), (1, ps._V2_SECTIONS)):
+        if version <= limit:
+            drop |= set(section)
+    if version <= 3:
+        drop.add("timeline_version")
+        doc["timeline"]["tracks"] = [t for t in doc["timeline"]["tracks"] if t["id"] != "track_v6"]
+    if version <= 1:
+        doc["scenes"] = []
+    for k in drop:
+        doc.pop(k, None)
+    doc["schema_version"] = version
+    f.write_text(json.dumps(doc), encoding="utf-8")
+    ws.close_project()
+    ws.open_project(root)
+    p = ws.project
+    assert p.schema_version == 8 and p.qc_issues == [] and p.qc_runs == [] and p.qc_scores is None and p.qc_history == [] and p.qc_cache == {} and p.qc_settings.block_level == "CRITICAL_ERROR"
+    gate = ws.qc.export_gate()
+    assert gate.needs_run and not gate.blocked  # never analysed: the export page runs QC first
+    ws.save()
+    saved = json.loads(f.read_text(encoding="utf-8"))
+    assert saved["schema_version"] == 8 and all(k in saved for k in qc_keys)
+    ws.qc.engine = QCEngine([Fake("timeline", [mk(Severity.WARNING, "t.w")])])
+    run_qc(ws)
+    assert len(ws.project.qc_runs) == 1 and ws.project.qc_runs[0]["number"] == 1
+
+
+_ = (FixRecord, MarkIssueFixedCommand)
+
+
+def test_post_render_qc_measures_the_file_against_the_snapshot_that_was_rendered(qws, tmp_path, monkeypatch):
+    """Regression: the expected size / length / frame rate came from the project as it is when the render FINISHES, so editing or changing the export resolution during a long
+    render made a correct file look wrong."""
+    from types import SimpleNamespace
+
+    from app.project.project_schema import RenderSettings
+    from app.qc import render_checker as rc
+
+    seen: list[dict] = []
+
+    def fake_inspect(self, ctx, path, *, render_id, expected, report):  # noqa: ARG001
+        seen.append(dict(expected))
+        return {"render_id": render_id, "status": "PASSED", "checks": [], "summary": ""}
+
+    monkeypatch.setattr(rc.RenderedFileChecker, "inspect", fake_inspect)
+    out = tmp_path / "out.mp4"
+    out.write_bytes(b"x")
+    ws = qws
+    ws.project.render_settings.resolution = "2160p"  # chosen AFTER the render started
+    ws.project.voice_over.duration = 99.0
+    snap = SimpleNamespace(settings=RenderSettings(resolution="720p", fps=0), canvas_w=1920, canvas_h=1080, fps=30, duration=12.5, voice_asset_id="asset_voice", tracks=[])
+    ws.qc.run_post_render_qc("r1", out, snapshot=snap)
+    assert ws.jobs.wait_idle(30)
+    assert seen[-1] == {"duration": 12.5, "width": 1280, "height": 720, "fps": 30, "has_audio": True}
+    assert ws.project.render_qc_results["r1"]["status"] == "PASSED"
+    ws.qc.run_post_render_qc("r2", out)  # no snapshot (an older caller): the project as it is
+    assert ws.jobs.wait_idle(30)
+    assert seen[-1]["width"] == 3840 and seen[-1]["duration"] == 99.0
