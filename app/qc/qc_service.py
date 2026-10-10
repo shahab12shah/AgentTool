@@ -26,6 +26,7 @@ from app.core.constants import APP_VERSION
 from app.jobs.job import Job
 from app.jobs.job_manager import JobManager
 from app.logging.logger import get_logger, log_event
+from app.performance.change_tracker import D_EDITING, D_QC_SETTINGS, QC_DOMAINS
 from app.project.phase8_commands import IgnoreIssuesCommand, SetQCSettingsCommand, StoreQCRunCommand, StoreRenderQCCommand, UnignoreCommand
 from app.project.project import Project
 from app.project.project_manager import ProjectManager
@@ -43,6 +44,8 @@ from app.rendering.ffmpeg_service import FFmpegService
 from app.rendering.probe import MediaProbeService
 
 _log = get_logger(__name__)
+INCREMENTAL_KEY = "_incremental"  # in Project.qc_cache next to the per-checker entries: what the last complete run vouched for (domain hashes, per-scene fingerprints)
+HASH_DOMAINS = tuple(d for d in QC_DOMAINS if d != D_EDITING)  # the names QCContext.domain_hash knows
 
 
 @dataclass
@@ -68,6 +71,27 @@ class GateResult:
         return self.run_current and self.decision.blocked
 
 
+@dataclass
+class IncrementalPlan:
+    """What an incremental run expects to do. ``mode``: ``none`` (the last run still matches the project), ``incremental`` (a baseline exists: only what changed is analysed again),
+    ``full`` (no usable baseline or a change that was not understood: every check runs, still re-using whatever is provably unchanged). The engine's own hash checks make the final
+    decision, so a plan can never make a run reuse something stale; it explains and bounds the work."""
+
+    mode: str
+    reason: str = ""
+    source: str = ""  # tracker | fingerprints | none
+    scene_ids: list[str] = field(default_factory=list)  # affected scenes, neighbours included, in timeline order
+    direct_scene_ids: list[str] = field(default_factory=list)
+    domains: list[str] = field(default_factory=list)
+    all_scenes: bool = False
+    checkers_rerun: list[str] = field(default_factory=list)
+    checkers_reused: list[str] = field(default_factory=list)
+
+    def summary(self) -> dict[str, Any]:
+        return {"mode": self.mode, "reason": self.reason, "source": self.source, "scenes": len(self.scene_ids), "all_scenes": self.all_scenes, "domains": list(self.domains),
+                "rerun": list(self.checkers_rerun), "reused": len(self.checkers_reused)}
+
+
 class QCService:
     def __init__(self, projects: ProjectManager, jobs: JobManager, bus: EventBus, apply_command: Callable[[Command], None], execute_command: Callable[[Command], object],
                  settings_getter: Callable, checkpoint: Callable[[Project, str], str], engine: QCEngine | None = None) -> None:
@@ -82,6 +106,7 @@ class QCService:
         self._lock = threading.RLock()
         self._ai_provider = None  # AIEditorialQCProvider override (tests / future providers)
         self._last_pub = (0.0, "")
+        self.tracker = None  # ProjectChangeTracker (installed by the Workspace): cheap "what changed since the last run" without hashing
         bus.subscribe(Topics.PROJECT_CHANGED, self._on_project_changed)
         bus.subscribe(Topics.PROJECT_OPENED, lambda *_a: self._reset())
         bus.subscribe(Topics.PROJECT_CLOSED, lambda *_a: self._reset())
