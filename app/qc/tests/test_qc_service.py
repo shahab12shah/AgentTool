@@ -347,7 +347,7 @@ def test_a_scene_run_never_hides_a_problem_in_another_scene_from_the_gate_or_the
     ws.qc.run_scene_qc(ws.s1.id)
     assert ws.jobs.wait_idle(30)
     g = ws.qc.export_gate()
-    assert not g.run_current and g.needs_run and ws.project.qc_runs[-1]["content_hash"] == ""  # the scene run is not a verdict on the project
+    assert not g.run_current and g.needs_run and ws.project.qc_runs[-1]["content_hash"] == "" and "did not cover the whole project" in g.message  # the scene run is not a verdict on the project
     run_qc(ws)
     assert [(i.code, i.scene_id) for i in ws.project.qc_issues] == [("scene.uncovered", ws.s2.id)]  # the full run really looks at scene 2
     g2 = ws.qc.export_gate()
@@ -503,3 +503,16 @@ def test_post_render_qc_measures_the_file_against_the_snapshot_that_was_rendered
     ws.qc.run_post_render_qc("r2", out)  # no snapshot (an older caller): the project as it is
     assert ws.jobs.wait_idle(30)
     assert seen[-1]["width"] == 3840 and seen[-1]["duration"] == 99.0
+
+
+def test_two_ignores_of_the_same_issue_get_distinct_ids_even_within_one_second(qws):
+    """Regression: the id was a hash of the issue id and the time to the second, so 'ignore this' followed by 'ignore this type' collided and Stop-ignoring removed both."""
+    ws = qws
+    ws.qc.engine = QCEngine([Fake("timeline", [mk(Severity.WARNING, "t.w", scene=ws.s1.id)])])
+    run_qc(ws)
+    iid = ws.qc.issues()[0].issue_id
+    a = ws.qc.ignore_issue(iid, "this one")
+    b = ws.qc.ignore_type(iid, "all of them")
+    assert a.ignore_id != b.ignore_id and len(ws.project.qc_ignored_issues) == 2
+    ws.qc.unignore(b.ignore_id)
+    assert [r.ignore_id for r in ws.project.qc_ignored_issues] == [a.ignore_id] and ws.project.qc_issues[0].ignored_by_user  # the first ignore still holds

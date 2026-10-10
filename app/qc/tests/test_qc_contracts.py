@@ -563,3 +563,13 @@ def test_a_project_wide_value_re_analyses_every_scene_not_just_the_changed_ones(
     chk.seen.clear()
     quiet = eng.run(qc_ctx(proj), previous=PreviousState(first.run.issues, first.cache))
     assert chk.seen == [] and quiet.run.checkers["scene"].state is CheckerState.CACHED
+
+
+def test_renumbering_a_scene_refreshes_the_titles_that_quote_its_label(proj):
+    """Findings name their scene ("Scene 2"): the cached text must not outlive a renumbering that leaves ids and times alone."""
+    chk = SceneFake()
+    eng = QCEngine([chk])
+    first = eng.run(qc_ctx(proj))
+    proj.s2.label = "3"
+    again = eng.run(qc_ctx(proj), previous=PreviousState(first.run.issues, first.cache))
+    assert chk.seen[-1] == [proj.s2.id] and again.run.checkers["scene"].reused_scenes == 1

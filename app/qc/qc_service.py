@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -425,7 +426,7 @@ class QCService:
             raise QCError("Ignore scope must be issue, type or type_scene.")
         if i.severity is Severity.CRITICAL:
             raise QCError("A critical issue cannot be ignored: fix it, or the export stays blocked.")
-        rec = IgnoreRecord(f"ign_{sha(issue_id, now_iso())}", "type" if scope.startswith("type") else "issue", i.fingerprint, i.code, i.scene_id if scope == "type_scene" else None, reason, now_iso(), i.title)
+        rec = IgnoreRecord(f"ign_{uuid.uuid4().hex[:12]}", "type" if scope.startswith("type") else "issue", i.fingerprint, i.code, i.scene_id if scope == "type_scene" else None, reason, now_iso(), i.title)
         self._execute(IgnoreIssuesCommand(p, rec))
         self._recount(p)
         self._publish("issue_changed", issue_id=issue_id)
@@ -536,7 +537,8 @@ class QCService:
         current = p.qc_runs[-1].get("content_hash") == self.current_content_hash(p) and bool(p.qc_runs[-1].get("content_hash"))
         failed = list(p.qc_runs[-1].get("failed", []))
         decision = decide_export(p.qc_issues, s.block_level, s.allow_export_override, failed)
-        msg = decision.message if current else "The project changed since the last QC run. " + decision.message
+        why = "The project changed since the last QC run. " if p.qc_runs[-1].get("content_hash") else "The last QC run did not cover the whole project (scene / category run or canceled). "
+        msg = decision.message if current else why + decision.message
         return GateResult(decision, current, not current, msg)
 
     # ------------------------------------------------------------------ post-render QC (a second pass on the actual file)

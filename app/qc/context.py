@@ -272,7 +272,7 @@ class QCContext:
                                                       for t in self.timeline.tracks], self.canvas, self.fps))
 
     def scenes_hash(self) -> str:
-        return self.memo("h.scenes", lambda: sha([[s.id, round(s.start, 3), round(s.end, 3), s.narration, round(s.importance, 3), s.topic] for s in self.scenes],
+        return self.memo("h.scenes", lambda: sha([[s.id, s.label, round(s.start, 3), round(s.end, 3), s.narration, round(s.importance, 3), s.topic] for s in self.scenes],
                                                     {k: v.type.value for k, v in self.project.visual_intents.items()}))
 
     def transcript_hash(self) -> str:
@@ -390,7 +390,7 @@ class QCContext:
                     facts.append([aid, ast.content_hash, st.st_size, int(st.st_mtime), ast.width, ast.height, ast.duration])
                 except OSError:
                     facts.append([aid, ast.content_hash, None])
-            return sha(facts, [s.id, round(s.start, 3), round(s.end, 3), s.narration, round(s.importance, 3), s.topic, [c.text for c in s.claims], [n.text for n in s.numbers]], words, clips, flags,
+            return sha(facts, [s.id, s.label, round(s.start, 3), round(s.end, 3), s.narration, round(s.importance, 3), s.topic, [c.text for c in s.claims], [n.text for n in s.numbers]], words, clips, flags,
                        (a.asset_id, a.approved, a.skipped, a.accuracy_score, a.selected_by, a.candidate_id) if a else None, neigh, (intent.type.value, intent.primary_subject) if intent else None,
                        scene_id in self.locked_scene_ids())
 
