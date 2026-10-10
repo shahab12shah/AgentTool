@@ -101,6 +101,21 @@ class EngineResult:
     complete: bool = True  # every enabled checker's findings were verified against the project as it is now (a scene / category run, a retry or a cancel may leave some unverified)
 
 
+def merge_metrics(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """Metrics of a scene-level re-analysis laid over the previous ones: tables keyed by scene (dict values) are merged entry by entry, so the scenes that were not re-run keep
+    their numbers, and the averages that are derived from such a table (visual fit) are recomputed from the whole table."""
+    out = dict(old)
+    for k, v in new.items():
+        out[k] = {**old[k], **v} if isinstance(v, dict) and isinstance(old.get(k), dict) else v
+    table = out.get("per_scene")
+    if isinstance(table, dict) and table:
+        for key, field_ in (("mean_current_score", "current"), ("mean_original_score", "original")):
+            vals = [r[field_] for r in table.values() if isinstance(r, dict) and isinstance(r.get(field_), (int, float))]
+            if key in out and vals:
+                out[key] = round(sum(vals) / len(vals), 1)
+    return out
+
+
 def classify(issue: QCIssue, settings: QCSettings) -> QCIssue:
     """Severity classification: a judgement (anything below 100 % confidence, and every AI finding) is never presented as stronger than its confidence allows."""
     if issue.confidence < 99.5 or issue.detection_source.startswith("ai:"):
@@ -331,7 +346,7 @@ class QCEngine:
                 if not covers_all:
                     keep += [i for i in global_prev if i.fingerprint not in seen]  # a scene run cannot re-judge what spans the whole project: those findings stay as they were
                 st.reused_scenes, st.analyzed_scenes = len(scenes) - len(changed), len(changed)
-                merged = CheckerOutput(keep + [i for i in out.issues if i.scene_id in changed or not i.scene_id], {**(entry or {}).get("metrics", {}), **out.metrics},
+                merged = CheckerOutput(keep + [i for i in out.issues if i.scene_id in changed or not i.scene_id], merge_metrics((entry or {}).get("metrics", {}), out.metrics),
                                        list(out.notes) + [f"re-analysed {len(changed)} of {len(scenes)} scenes"], out.complete)
                 if partial:
                     st.input_hash = ""  # never equal to a real key: the entry does not vouch for the whole project
@@ -349,7 +364,7 @@ class QCEngine:
                     ctx.scene_filter = saved
                 keep = [i for i in prev_issues if i.scene_id in hashes and i.scene_id not in changed]
                 st.reused_scenes, st.analyzed_scenes = len(scenes) - len(changed), len(changed)
-                merged = CheckerOutput(keep + [i for i in out.issues if i.scene_id in changed or not i.scene_id], {**(entry or {}).get("metrics", {}), **out.metrics},
+                merged = CheckerOutput(keep + [i for i in out.issues if i.scene_id in changed or not i.scene_id], merge_metrics((entry or {}).get("metrics", {}), out.metrics),
                                        list(out.notes) + [f"re-analysed {len(changed)} of {len(scenes)} scenes"], out.complete)
                 st.state = CheckerState.DONE
                 return merged, False

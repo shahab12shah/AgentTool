@@ -13,7 +13,7 @@ from pathlib import Path
 
 from app.core.exceptions import AppError, InvalidProjectError
 from app.qc.checker_base import BaseChecker, CheckerOutput
-from app.qc.context import ProgressFn, QCContext, sha
+from app.qc.context import ProgressFn, QCCancelled, QCContext, sha
 from app.qc.issue_model import QCCategory
 from app.qc.media_facts import ffmpeg_ready, probe_used, used_assets
 from app.qc.severity import Severity
@@ -169,8 +169,13 @@ class PreflightChecker(BaseChecker):
             return
         try:
             report = self._diagnostics(ctx)
+        except QCCancelled:
+            raise
         except (AppError, OSError) as exc:
             out.notes.append(f"render diagnostics unavailable: {exc}")
+            return
+        except (ArithmeticError, ValueError, TypeError) as exc:  # clip data the diagnostics cannot read (a non-finite time ...): the timeline checker reports the clip, the findings above stay
+            out.notes.append(f"render diagnostics could not read the timeline data: {type(exc).__name__}: {exc}")
             return
         for item in report.items:
             code = ITEM_CODES.get(item.id)

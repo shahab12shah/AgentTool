@@ -77,10 +77,18 @@ class AudioChecker(BaseChecker):
     label = "Audio"
     categories = (QCCategory.AUDIO, QCCategory.SILENCE)
     domains = ("audio", "timeline", "transcript", "assets")
-    settings_sections = ("audio",)
+    settings_sections = ("audio", "intentional_gaps")  # declared gaps are not reported as silence
     scene_local = False
     expensive = True
     version = "1"
+
+    @staticmethod
+    def _misaligned(ctx: QCContext) -> list[str]:
+        """The voice clips the timeline checker already reports as not starting at 0:00 / not playing in full (the same problem as a voice-over that is cut short)."""
+        return sorted(i.timeline_item_id or "" for i in getattr(ctx.shared.get("timeline"), "issues", []) if i.code == "timeline.voice.misaligned")
+
+    def input_hash(self, ctx: QCContext) -> str:
+        return sha(super().input_hash(ctx), self._misaligned(ctx))  # not ``uses_shared``: decoding the audio again for every change of any other checker's findings would be wasteful
 
     # ------------------------------------------------------------------ the work
     def run(self, ctx: QCContext, report: ProgressFn) -> CheckerOutput:
@@ -172,7 +180,7 @@ class AudioChecker(BaseChecker):
                 "audio.voice_missing", QCCategory.AUDIO, Severity.CRITICAL, "The voice-over cannot be heard", description=f"The voice-over is on the timeline but {why}.", clip=v.clip, track=v.track,
                 why="A video without audible narration loses its message.", current="inaudible", recommended="audible narration", suggested_fix="Unmute the voice track or raise its volume.", viewer_impact=1.0,
                 signature="inaudible", ctx=ctx))
-        if v.clip is not None and p.voice_over.duration and v.clip.duration < p.voice_over.duration - cfg.voice_duration_tolerance:
+        if v.clip is not None and p.voice_over.duration and v.clip.duration < p.voice_over.duration - cfg.voice_duration_tolerance and v.clip.id not in self._misaligned(ctx):
             cut = p.voice_over.duration - v.clip.duration
             out.issues.append(self.issue(
                 "audio.voice_duration", QCCategory.AUDIO, Severity.ERROR, "The voice-over is cut short", description=f"The voice-over is {p.voice_over.duration:.1f} s long but only {v.clip.duration:.1f} s of it is on the timeline "
@@ -449,10 +457,11 @@ class AudioChecker(BaseChecker):
             masked = controller.masking("MUSIC", lambda t, c=curve: float(c[min(len(c) - 1, int(t / STEP))]), speech, dur)
             masked_s = sum(m.end - m.start + STEP for m in masked)
             loud_s = float((rel[under] > cfg.music_over_voice_db).sum() * STEP)
+            peak_rel = float(np.max(rel[under]))  # the loudest the music gets next to the voice while it speaks (the median alone can sit under the limit while a stretch is above it)
             sc_id = self._scene_for(ctx, g.items[0].start)
             where = dict(start=g.items[0].start, end=g.items[-1].end, scene_id=sc_id, clip=g.clip, track=g.track, ctx=ctx)
             conf = 100.0 if (g.measured and not voice.fallback) else 75.0
-            m = {"relative_db": round(rel_speech, 1), "duck_depth_db": _r(depth), "masked_seconds": round(masked_s, 1), "loud_seconds": round(loud_s, 1)}
+            m = {"relative_db": round(rel_speech, 1), "peak_relative_db": round(peak_rel, 1), "duck_depth_db": _r(depth), "masked_seconds": round(masked_s, 1), "loud_seconds": round(loud_s, 1)}
             if rel_speech > 0.0 and loud_s >= 1.0:
                 out.issues.append(self.issue(
                     "audio.music_masks_speech", QCCategory.AUDIO, Severity.ERROR, "Music covers the narration",
@@ -469,8 +478,9 @@ class AudioChecker(BaseChecker):
             elif loud_s >= 1.0:
                 out.issues.append(self.issue(
                     "audio.music_loud", QCCategory.AUDIO, Severity.WARNING, "Music is too loud next to the voice",
-                    description=f"Even when ducked the music averages {rel_speech:+.1f} dB relative to the voice (limit {cfg.music_over_voice_db:.0f} dB) for {loud_s:.1f} s.", why="Music should support, not compete.",
-                    current=f"{rel_speech:+.1f} dB vs voice", recommended=f"{cfg.music_over_voice_db:.0f} dB or lower", suggested_fix="Lower the music volume.", confidence=conf, viewer_impact=0.5,
+                    description=f"Even when ducked the music is louder than {cfg.music_over_voice_db:.0f} dB relative to the voice for {loud_s:.1f} s of the speech (up to {peak_rel:+.1f} dB, "
+                    f"typically {rel_speech:+.1f} dB).", why="Music should support, not compete.",
+                    current=f"up to {peak_rel:+.1f} dB vs voice for {loud_s:.1f} s", recommended=f"{cfg.music_over_voice_db:.0f} dB or lower", suggested_fix="Lower the music volume.", confidence=conf, viewer_impact=0.5,
                     signature=sha(g.key), metrics=m, fix=self._level_fix(ctx, g, rel_speech - cfg.music_over_voice_db), **where))
             self._music_jumps(ctx, out, cfg, g, curve)
         if depths:

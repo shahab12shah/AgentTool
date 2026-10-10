@@ -228,3 +228,33 @@ def test_no_visuals_is_not_an_error(tmp_path):
     p = new_project(tmp_path)
     out = run(p)
     assert out.issues == [] and out.metrics["shots"] == 0
+
+
+def test_one_cut_is_not_reported_twice_and_a_restart_is_not_called_a_jump_forward(tmp_path):
+    p0, _ = build(tmp_path / "probe", [20.0])
+    ph = [w for w in p0.transcription.transcript.words if 0 <= w.start < 10]
+    mid = (ph[0].start + ph[-1].end) / 2
+    p, clips = build(tmp_path / "x", [mid, 20.0], assets=1)
+    clips[0].source_in, clips[0].source_out = 10.0, 10.0 + clips[0].duration
+    clips[1].source_in, clips[1].source_out = 60.0, 60.0 + clips[1].duration  # a jump inside the same sentence, in the middle of the phrase
+    out = run(p)
+    assert len(find(out, "cut.awkward")) == 1 and find(out, "cut.unnecessary") == []  # the cut that interrupts a phrase is reported once, with the phrase
+    clips[1].source_in, clips[1].source_out = 0.0, clips[1].duration  # restarting short footage under a long sentence
+    p2, clips2 = build(tmp_path / "y", [4.5], assets=1)
+    clips2[1].source_in, clips2[1].source_out = 0.0, clips2[1].duration
+    i = find(run(p2), "cut.unnecessary")
+    assert len(i) == 1 and "again" in i[0].description and "forward" not in i[0].description
+
+
+def test_a_run_leaves_no_state_on_the_shared_checker_instance(tmp_path):
+    """One checker instance serves every run (and thread): the sensitivity of one run must not leak into the next one."""
+    cuts = [i * 1.5 for i in range(1, 40)]
+    p, _ = build(tmp_path, cuts, total=60.0, assets=3)
+    ck = PacingChecker()
+    p.qc_settings.pacing.sensitivity = 1.0
+    strict = run_checker(ck, qc_ctx(p))
+    p.qc_settings.pacing.sensitivity = 0.0
+    lenient = run_checker(ck, qc_ctx(p))
+    p.qc_settings.pacing.sensitivity = 1.0
+    again = run_checker(ck, qc_ctx(p))
+    assert vars(ck) == {} and codes(strict) == codes(again) and codes(strict) != codes(lenient)

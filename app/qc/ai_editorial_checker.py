@@ -19,6 +19,7 @@ never allowed above WARNING, and QC does not judge whether any statement is true
 from __future__ import annotations
 
 import json
+import math
 import re
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
@@ -30,6 +31,7 @@ from app.qc import fix_catalog as fx
 from app.qc.checker_base import BaseChecker, CheckerOutput
 from app.qc.context import ProgressFn, QCContext, sha
 from app.qc.issue_model import QCCategory, QCIssue, SCORE_GROUPS
+from app.qc.media_facts import extras
 from app.qc.severity import Severity, cap_for_confidence, parse_severity
 
 QUESTIONS: dict[str, str] = {
@@ -312,7 +314,7 @@ class APIEditorialQCProvider(AIEditorialQCProvider):
 
 def parse_review(provider: str, text: str, request: EditorialRequest) -> EditorialReview:
     """Validate an AI answer strictly. Malformed or unknown parts are dropped (and counted in the notes); an answer that is not JSON at all is an error."""
-    m = re.search(r"\{.*\}", text or "", re.S)
+    m = re.search(r"\{.*\}", text, re.S) if isinstance(text, str) else None  # a client may hand back anything
     try:
         data = json.loads(m.group(0)) if m else None
     except ValueError:
@@ -339,8 +341,8 @@ def parse_review(provider: str, text: str, request: EditorialRequest) -> Editori
             dropped += 1
             continue
         sid = f.get("scene_id")
-        if sid is not None and sid not in scenes:
-            dropped += 1  # a finding about a scene that does not exist cannot be placed
+        if sid is not None and (not isinstance(sid, str) or sid not in scenes):
+            dropped += 1  # a finding about a scene that does not exist (or names one with something that is not an id) cannot be placed
             continue
         sev = str(f.get("severity", "NOTICE")).upper()
         sev = sev if sev in ALLOWED_SEVERITIES else "NOTICE"
@@ -353,7 +355,7 @@ def parse_review(provider: str, text: str, request: EditorialRequest) -> Editori
 
 
 def _num(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)  # NaN and infinity are not a confidence
 
 
 def _clamp(v: Any) -> float:
@@ -410,7 +412,7 @@ class EditorialChecker(BaseChecker):
 
     def input_hash(self, ctx: QCContext) -> str:
         chosen = getattr(ctx.ai_provider, "name", "") if ctx.ai_provider is not None else ""
-        return sha(super().input_hash(ctx), chosen)
+        return sha(super().input_hash(ctx), chosen, extras(ctx, "facts", "assets"))  # the request carries claim / number counts and the picture names
 
     def run(self, ctx: QCContext, report: ProgressFn) -> CheckerOutput:
         out = CheckerOutput()

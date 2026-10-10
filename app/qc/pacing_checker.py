@@ -12,6 +12,7 @@ scenes and at where cuts land in the speech.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from statistics import median
@@ -22,6 +23,7 @@ from app.qc import fix_catalog as fx
 from app.qc.checker_base import BaseChecker, CheckerOutput
 from app.qc.context import ProgressFn, QCContext, sha
 from app.qc.issue_model import QCCategory
+from app.qc.media_facts import extras
 from app.qc.severity import Severity
 from app.qc.style_compat import measured_scores, style_issue, target_score
 from app.reference.style_model import PACING_POINTS, pacing_class, scale
@@ -100,11 +102,14 @@ class PacingChecker(BaseChecker):
     scene_local = False
     version = "1"
 
+    def input_hash(self, ctx: QCContext) -> str:
+        """Besides the domains: the AI decisions that excuse a cut or a burst, the scenes' claims / numbers / intent, and the source type of the pictures (evidence is held to be read)."""
+        return sha(super().input_hash(ctx), extras(ctx, "decisions", "facts", "assets"))
+
     # ------------------------------------------------------------------ the work
     def run(self, ctx: QCContext, report: ProgressFn) -> CheckerOutput:
         out = CheckerOutput()
         cfg = ctx.settings.pacing
-        self.f = 1.5 - max(0.0, min(1.0, cfg.sensitivity))  # >1 = more lenient, <1 = stricter
         shots = self._shots(ctx)
         duration = max(ctx.duration, shots[-1].end if shots else 0.0)
         if not shots or duration <= 0:
@@ -135,10 +140,15 @@ class PacingChecker(BaseChecker):
         report(1.0, "Pacing check complete")
         return out
 
+    @staticmethod
+    def _f(cfg) -> float:
+        """The sensitivity factor (>1 = more lenient, <1 = stricter). Derived on each call: a checker instance is shared by every run, so a run must not leave state on it."""
+        return 1.5 - max(0.0, min(1.0, cfg.sensitivity))
+
     # ------------------------------------------------------------------ shot structure
     def _shots(self, ctx: QCContext) -> list[_Shot]:
         """One shot per picture the viewer sees: clips on the video/image tracks, a continuing clip (same footage, contiguous) merged into the shot it continues."""
-        rows = [(t, c) for t, c in ctx.visual_clips() if c.duration > 1e-3 and c.timeline_start >= -1e-6]
+        rows = [(t, c) for t, c in ctx.visual_clips() if c.duration > 1e-3 and c.timeline_start >= -1e-6 and math.isfinite(c.duration) and math.isfinite(c.timeline_start)]
         rows.sort(key=lambda r: (r[1].timeline_start, r[1].id))
         shots: list[_Shot] = []
         for t, c in rows:
@@ -232,7 +242,7 @@ class PacingChecker(BaseChecker):
 
     # ------------------------------------------------------------------ findings: rhythm
     def _too_fast(self, ctx: QCContext, out: CheckerOutput, cfg, windows: list[_Window]) -> None:
-        limit = cfg.too_fast_cuts_per_minute * self.f
+        limit = cfg.too_fast_cuts_per_minute * self._f(cfg)
         flagged = []
         for w in windows:
             support = w.sentences_pm * ctx.settings.coverage.max_cuts_per_sentence  # what the story can carry: a couple of picture changes per sentence
@@ -250,7 +260,7 @@ class PacingChecker(BaseChecker):
 
     def _too_slow(self, ctx: QCContext, out: CheckerOutput, cfg, shots: list[_Shot]) -> None:
         """A picture that outlasts several sentences while nothing else changes (a hold inside one scene is the scene checker's); evidence and data holds are for reading."""
-        limit = cfg.too_slow_shot_seconds * self.f
+        limit = cfg.too_slow_shot_seconds * self._f(cfg)
         sents = ctx.sentences
         done = 0
         for s in shots:
@@ -292,7 +302,7 @@ class PacingChecker(BaseChecker):
         if len(windows) < 3:
             return
         med = max(MIN_MEDIAN_CPM, median(w.cpm for w in windows))
-        limit = cfg.uneven_ratio * self.f
+        limit = cfg.uneven_ratio * self._f(cfg)
         flagged = [(w, w.cpm / med) for w in windows if w.cpm > limit * med and w.cpm - med >= 6 and not self._justified(ctx, w.start, w.end)]
         for r in self._runs(windows, flagged)[:MAX_ISSUES_PER_CODE]:
             avg = sum(w.cpm for w in r.windows) / len(r.windows)
@@ -303,7 +313,7 @@ class PacingChecker(BaseChecker):
                 confidence=70.0, viewer_impact=0.3, signature=sha(round(r.start / 10)), ctx=ctx))
 
     def _over_edited(self, ctx: QCContext, out: CheckerOutput, cfg, windows: list[_Window], wps: float) -> None:
-        limit = cfg.over_edit_events_per_minute * self.f * min(1.3, max(0.8, wps / 2.5 if wps else 1.0))
+        limit = cfg.over_edit_events_per_minute * self._f(cfg) * min(1.3, max(0.8, wps / 2.5 if wps else 1.0))
         flagged = [(w, w.epm) for w in windows if w.epm > limit and not self._justified(ctx, w.start, w.end)]
         for r in self._runs(windows, flagged)[:MAX_ISSUES_PER_CODE]:
             avg = sum(w.epm for w in r.windows) / len(r.windows)
@@ -400,8 +410,9 @@ class PacingChecker(BaseChecker):
         """A jump inside one sentence between two parts of the same footage, with nothing else changing: a cut for the sake of a cut."""
         sents = ctx.sentences
         done = 0
+        awkward = {i.timeline_item_id for i in out.issues if i.code == "cut.awkward"}  # the same cut is already reported, with the phrase it interrupts
         for a, b in zip(shots, shots[1:]):
-            if a.asset_id != b.asset_id or done >= MAX_ISSUES_PER_CODE or abs(a.end - b.start) > ctx.frame * 1.5:
+            if a.asset_id != b.asset_id or done >= MAX_ISSUES_PER_CODE or abs(a.end - b.start) > ctx.frame * 1.5 or b.clip.id in awkward:
                 continue
             t = b.start
             inside = next((x for x in sents if x.start + 0.3 < t < x.end - 0.3), None)
@@ -410,10 +421,12 @@ class PacingChecker(BaseChecker):
             if self._moves(b.clip) or (b.clip.transition and str(b.clip.transition.get("type", "CUT")).upper() != "CUT") or any(c.timeline_start >= t - 0.5 and c.timeline_start <= t + 0.5 for _t, c in ctx.clips() if c.kind in (KIND_TEXT, KIND_GRAPHIC)):
                 continue
             done += 1
-            jump = abs(b.clip.source_in - a.clip.source_out)
+            delta = b.clip.source_in - a.clip.source_out
+            jump = abs(delta)
+            how = f"jumps {jump:.1f} s forward in the same footage" if delta > 0 else f"starts the same footage again, {jump:.1f} s earlier,"  # a restart (a short source looped under a long scene) is not a jump forward
             out.issues.append(self.issue(
                 "cut.unnecessary", QCCategory.CUT_TIMING, Severity.NOTICE, "Cut inside a sentence with no change of picture",
-                description=f"At {_t(t)} the edit jumps {jump:.1f} s forward in the same footage in the middle of a sentence, and nothing else changes.", start=t - 0.3, end=t + 0.3, scene_id=b.scene_id,
+                description=f"At {_t(t)} the edit {how} in the middle of a sentence, and nothing else changes.", start=t - 0.3, end=t + 0.3, scene_id=b.scene_id,
                 clip=b.clip, track=b.track, why="A jump cut with no new information looks like a mistake and breaks the flow of the explanation.", current=f"jump of {jump:.1f} s",
                 recommended="one continuous shot, or a different picture", suggested_fix="Join the two parts, or put a different visual or a movement on the second part.", confidence=65.0,
                 viewer_impact=0.3, signature=sha(b.clip.id), ctx=ctx))

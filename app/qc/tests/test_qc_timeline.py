@@ -562,3 +562,15 @@ def test_real_ai_edited_project_is_clean_and_a_removed_clip_becomes_a_gap(pres_w
     out = check(p)
     gap = [i for i in out.issues if i.code == "timeline.gap.unintended"]
     assert gap and gap[0].scene_id == mid.id and out.metrics["visual_covered_ratio"] < 1.0
+
+
+def test_a_scene_the_user_marked_as_skipped_is_not_an_unintended_gap(tmp_path):
+    """"Show no visual here" is a choice (scene.coverage.skipped mentions it); reporting the same stretch as an ERROR would block the export for it."""
+    from app.research.models import VisualAssignment
+
+    p, _ = with_gap(tmp_path)
+    assert one(check(p), "timeline.gap.unintended").severity is Severity.ERROR
+    p.visual_assignments["scene_002"] = VisualAssignment("scene_002", None, None, "USER", 0.0, False, True)
+    out = check(p)
+    none_of(out, "timeline.gap.unintended")
+    assert out.metrics["intentional_gap_seconds"] == pytest.approx(10.0) and out.metrics["gap_count"] == 0

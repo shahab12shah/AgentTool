@@ -58,7 +58,7 @@ class RenderReadinessChecker(BaseChecker):
     id = "render"
     label = "Render readiness"
     categories = (QCCategory.RENDER_READINESS,)
-    domains = ("timeline", "assets", "render")
+    domains = ("timeline", "assets", "render", "captions", "audio")  # the dry run compiles the caption styles / fonts and the audio mix too
     settings_sections = ("media",)
     scene_local = False
     expensive = True

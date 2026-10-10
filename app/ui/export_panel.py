@@ -81,6 +81,7 @@ class ExportPanel(QWidget):
         self._allow_proxy: set[str] = set()
         self._preview_path: Path | None = None
         self._check_token = 0
+        self._qc_pending = False  # quality control is running on behalf of "Start export": it continues by itself when the run finishes
 
         title = QLabel("EXPORT VIDEO")
         title.setObjectName("title")
@@ -237,12 +238,17 @@ class ExportPanel(QWidget):
         self.result_info = QLabel("")
         self.result_info.setObjectName("exportCompleteInfo")
         self.result_info.setTextFormat(Qt.TextFormat.PlainText)
+        self.render_check = QLabel("")
+        self.render_check.setObjectName("exportRenderCheck")
+        self.render_check.setWordWrap(True)
+        self.render_check.setTextFormat(Qt.TextFormat.PlainText)
         self.open_video_btn, self.open_folder_btn, self.again_btn, self.back_btn = (QPushButton(t) for t in ("Open Video", "Open Folder", "Export Again", "Return to Editor"))
         self.open_video_btn.clicked.connect(self.open_video)
         self.open_folder_btn.clicked.connect(self.open_folder)
         self.again_btn.clicked.connect(self._reset_cards)
         self.back_btn.clicked.connect(self.return_to_editor.emit)
         self._fill_card(self.result_card, self.result_title, self.result_info, (self.open_video_btn, self.open_folder_btn, self.again_btn, self.back_btn))
+        self.result_card.layout().insertWidget(2, self.render_check)  # under the file facts: what the second QC pass found in the exported video
         self.fail_card = self._card("exportFailed")
         self.fail_title = QLabel("Render Failed")
         self.fail_title.setObjectName("title")
@@ -402,7 +408,8 @@ class ExportPanel(QWidget):
         ctx.bridge.on("render.updated", lambda p: self._on_job(p["job"]))
         ctx.bridge.on("render.history_changed", lambda p: self.refresh_history())
         ctx.bridge.on("proxy.changed", lambda p: self.refresh_proxies())
-        ctx.bridge.on("project.opened", lambda p: self.refresh())
+        ctx.bridge.on("qc.updated", self._on_qc_event)
+        ctx.bridge.on("project.opened", lambda p: (setattr(self, "_qc_pending", False), self.refresh()))
         ctx.bridge.on("project.closed", lambda p: self._clear())
 
     # ================================================================ small builders
@@ -429,6 +436,10 @@ class ExportPanel(QWidget):
         self.fail_card.setVisible(False)
 
     def _clear(self) -> None:
+        self._qc_pending = False
+        self._current_job = None
+        self.qc_line.setText("")
+        self.render_check.setText("")
         self.queue_table.setRowCount(0)
         self._rows.clear()
         self.history_table.setRowCount(0)
@@ -456,6 +467,10 @@ class ExportPanel(QWidget):
         if ws.project is None:
             self.qc_line.setText("")
             return
+        if self._qc_pending:
+            self.qc_line.setText("Quality control is running before the export… it starts by itself when the check is done.")
+            self.qc_line.setStyleSheet("")
+            return
         try:
             g = ws.qc.export_gate()
         except Exception:  # noqa: BLE001  (informational only)
@@ -467,6 +482,39 @@ class ExportPanel(QWidget):
         else:
             self.qc_line.setText("Quality control: " + g.decision.message)
             self.qc_line.setStyleSheet("color: #ff9d9d;" if g.decision.blocked else "color: #e5a24a;" if g.decision.status == "AVAILABLE" else "color: #6fcf97;")
+
+    def _on_qc_event(self, payload: dict) -> None:
+        """A QC run finished / was ignored / fixed, or the file check arrived: the gate line and the exported file's check follow at once."""
+        if self.ctx.ws.project is None or payload.get("kind") == "progress":
+            return
+        if payload.get("kind") in ("run_finished", "run_canceled", "run_failed") and self._qc_pending:
+            self._end_qc_wait()
+        self._refresh_qc_line()
+        self._refresh_render_check()
+
+    def _end_qc_wait(self) -> None:
+        self._qc_pending = False
+        self.start_btn.setEnabled(bool(self._report is None or self._report.can_start))
+
+    def _refresh_render_check(self) -> None:
+        """The second QC pass (on the exported file) as one line on the result card: pending, or its verdict, or that it is switched off."""
+        ws = self.ctx.ws
+        job = ws.render.job(self._current_job) if (self._current_job and ws.project is not None) else None
+        if job is None or job.status is not RenderStatus.COMPLETED or job.record.kind != "export":
+            self.render_check.setText("")
+            return
+        res = ws.qc.render_results().get(job.id)
+        if res:
+            summary = res.get("summary", "")
+            self.render_check.setText(f"File check: {str(res.get('status', '?')).title()}" + (f" — {summary}" if summary else "") + "  (details on the Quality page, “Rendered file”)")
+            bad = str(res.get("status", "")).upper() in ("FAILED", "ERROR")
+            self.render_check.setStyleSheet("color: #ff9d9d;" if bad else "color: #e5a24a;" if str(res.get("status", "")).upper() == "WARNINGS" else "color: #6fcf97;")
+        elif ws.project.qc_settings.post_render_qc:
+            self.render_check.setText("File check: checking the exported video…")
+            self.render_check.setStyleSheet("")
+        else:
+            self.render_check.setText("File check: switched off in the QC settings.")
+            self.render_check.setStyleSheet("")
 
     def _set(self, combo: QComboBox, data) -> None:
         i = combo.findData(data)
@@ -572,7 +620,7 @@ class ExportPanel(QWidget):
     def _show_report(self, rep: PreflightReport) -> None:
         self._report = rep
         self.preflight_view.setText(rep.text().split("\n", 2)[2] if rep.text().count("\n") >= 2 else rep.text())
-        self.start_btn.setEnabled(rep.can_start)
+        self.start_btn.setEnabled(rep.can_start and not self._qc_pending)
         self.draft_btn.setEnabled(True)
         self.fix_btn.setVisible(bool(rep.errors))
         if rep.errors:
@@ -621,19 +669,42 @@ class ExportPanel(QWidget):
 
     def _submit(self, draft: bool, *, qc_checked: bool = False, qc_override: bool = False) -> None:
         ws = self.ctx.ws
-        if ws.project is None:
+        if ws.project is None or (self._qc_pending and not draft):
             return
         self._reset_cards()
         if not draft and not qc_checked and ws.project.qc_settings.run_before_export:
             gate = ws.qc.export_gate()
             if gate.needs_run:  # QC has not looked at this version of the project: run it first, then continue exporting
                 self.status("Running quality control before the export…")
+                project_id = ws.project.project_id
+
+                def after_qc(_run) -> None:
+                    # the export continues only for the project that was checked, and only if it still is what QC looked at (an edit made while QC ran would export unchecked work)
+                    self._end_qc_wait()
+                    cur = self.ctx.ws.project
+                    if cur is None or cur.project_id != project_id:
+                        return
+                    if self.ctx.ws.qc.export_gate().needs_run:
+                        self._refresh_qc_line()
+                        self.status("The project changed while quality control was running: press Start export again.")
+                        return
+                    self._submit(False, qc_checked=True)
+
+                def qc_failed(job) -> None:
+                    self._end_qc_wait()
+                    self.status(f"Quality control failed: {job.error}")
+
+                self._qc_pending = True
                 try:
-                    ws.qc.run_full_qc(trigger="export", on_done=lambda _run: self._submit(False, qc_checked=True), on_error=lambda job: self.status(f"Quality control failed: {job.error}"))
-                    return
+                    ws.qc.run_full_qc(trigger="export", on_done=after_qc, on_error=qc_failed)
                 except AppError as exc:
+                    self._qc_pending = False
                     QMessageBox.warning(self, "Quality control", exc.user_message)
                     return
+                self.start_btn.setEnabled(False)
+                self.qc_line.setText("Quality control is running before the export… it starts by itself when the check is done.")
+                self.qc_line.setStyleSheet("")
+                return
 
         def go() -> None:
             ws.render.update_settings(**self._gather())
@@ -668,6 +739,8 @@ class ExportPanel(QWidget):
                 names.append(f"• {i.severity.value.title()} — {i.title}")
             except AppError:
                 continue
+        if len(exc.issue_ids) > 8:
+            names.append(f"• … and {len(exc.issue_ids) - 8} more")
         text = exc.user_message + (chr(10) * 2 + chr(10).join(names) if names else "")
         box = QMessageBox(QMessageBox.Icon.Warning, "Export blocked", text, QMessageBox.StandardButton.NoButton, self)
         box.setObjectName("exportBlockedDialog")
@@ -774,6 +847,7 @@ class ExportPanel(QWidget):
                                      f"FPS:\n{r.plan.fps}" + (f"\n\nNotes:\n" + "\n".join(r.warnings[:4]) if r.warnings else ""))
             self.fail_card.setVisible(False)
             self.result_card.setVisible(True)
+            self._refresh_render_check()
         elif job.status is RenderStatus.FAILED and job.error is not None:
             e = job.error
             self.fail_info.setText(f"Stage:\n{e.stage}\n\nPossible issue:\n{e.possible_issue or e.user_message}\n\n{e.user_message}")

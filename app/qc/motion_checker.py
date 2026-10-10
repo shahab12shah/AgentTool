@@ -18,6 +18,7 @@ from app.qc import fix_catalog as fx
 from app.qc.checker_base import BaseChecker, CheckerOutput
 from app.qc.context import ProgressFn, QCContext, sha
 from app.qc.issue_model import QCCategory
+from app.qc.media_facts import extras
 from app.qc.severity import Severity
 from app.timeline.clip import KIND_CAPTION, KIND_GRAPHIC, KIND_TEXT, Clip
 from app.timeline.keyframes import Keyframe, value_at
@@ -55,16 +56,19 @@ class MotionChecker(BaseChecker):
     id = "motion"
     label = "Motion"
     categories = (QCCategory.MOTION,)
-    domains = ("timeline", "transcript")
+    domains = ("timeline", "transcript", "scenes", "assets")  # scenes: which scene a clip belongs to and what kind of picture it shows (a document must be read); assets: the picture size a pan is measured against
     settings_sections = ("motion",)
     scene_local = True
     version = "1"
+
+    def input_hash(self, ctx: QCContext) -> str:
+        return sha(super().input_hash(ctx), extras(ctx, "decisions", "facts"))
 
     def scene_input_hash(self, ctx: QCContext, scene_id: str) -> str:
         """Besides the scene's own signature: the text clips that can overlap its clips and the canvas the pan is measured against."""
         s = ctx.scene(scene_id)
         overlay = [(c.id, round(c.timeline_start, 3), round(c.duration, 3)) for _t, c in ctx.clips_in(s.start - 0.5, s.end + 0.5, kinds=(KIND_CAPTION, KIND_TEXT, KIND_GRAPHIC))] if s else []
-        return sha(super().scene_input_hash(ctx, scene_id), overlay, ctx.canvas, ctx.fps)
+        return sha(super().scene_input_hash(ctx, scene_id), overlay, ctx.canvas, ctx.fps, extras(ctx, "decisions", "facts", scene_id=scene_id))
 
     def run(self, ctx: QCContext, report: ProgressFn) -> CheckerOutput:
         out = CheckerOutput()
@@ -100,18 +104,34 @@ class MotionChecker(BaseChecker):
 
     # ------------------------------------------------------------------ keyframe segments
     @staticmethod
-    def _segments(c: Clip) -> list[_Seg]:
+    def _segments(c: Clip, skip: frozenset[str] | set[str] = frozenset()) -> list[_Seg]:
         segs = []
         for prop in MOTION_PROPS:
-            pts = sorted((k for k in c.keyframes if k.property == prop and math.isfinite(k.time) and math.isfinite(k.value)), key=lambda k: k.time)
+            pts = sorted((k for k in c.keyframes if k.property == prop and math.isfinite(k.time) and math.isfinite(k.value) and k.decision_id not in skip), key=lambda k: k.time)
             segs += [_Seg(prop, a.time, b.time, a.value, b.value, a.interpolation) for a, b in zip(pts, pts[1:]) if abs(b.value - a.value) > 1e-9]
         return segs
+
+    @staticmethod
+    def _focus_ids(ctx: QCContext, c: Clip) -> set[str]:
+        """The ids of the editing decisions that planned an EVIDENCE focus on this clip (zoom to the region, hold, return): the keyframes they own are a deliberate move, not decoration."""
+        def build() -> dict[str, set[str]]:
+            m: dict[str, set[str]] = {}
+            for d in ctx.project.editing_decisions.values():
+                if d.target_id and str(getattr(d.type, "value", d.type)) == "EVIDENCE_FOCUS":
+                    m.setdefault(d.target_id, set()).add(d.decision_id)
+            return m
+
+        return ctx.memo("motion.focus", build).get(c.id, set())
 
     def _clip(self, ctx: QCContext, c: Clip, t: Track, sid: str, segs: list[_Seg], cfg) -> list:
         out = []
         base = dict(scene_id=sid, clip=c, track=t, ctx=ctx)
         W, H = ctx.canvas
-        scale_kf = sorted((k for k in c.keyframes if k.property == "scale" and math.isfinite(k.value) and k.value > 0), key=lambda k: k.time)
+        focus = self._focus_ids(ctx, c)
+        all_segs = segs
+        if focus:  # the evidence focus is judged by its readability under text only; its zoom depth and speed are the point of it
+            segs = self._segments(c, focus)
+        scale_kf = sorted((k for k in c.keyframes if k.property == "scale" and math.isfinite(k.value) and k.value > 0 and k.decision_id not in focus), key=lambda k: k.time)
         cs = max(c.scale, 1e-6) if math.isfinite(c.scale) else 1.0
         # ---- total zoom
         peak = max([cs * k.value for k in scale_kf] + [cs]) if cs > 0 else 1.0
@@ -183,7 +203,7 @@ class MotionChecker(BaseChecker):
                 start=c.timeline_start, end=c.timeline_end, why="Viewers read evidence; a moving page is harder to read.", current="moving evidence", recommended="static, or a deliberate focus zoom", suggested_fix="Hold the picture still, or use an evidence focus on the relevant region.",
                 viewer_impact=0.3, signature=sha(c.id, "evidence"), confidence=70.0, **base))
         # ---- readability under text
-        out += self._readability(ctx, c, t, sid, segs, cs, cfg, W)
+        out += self._readability(ctx, c, t, sid, all_segs, cs, cfg, W, focus)
         return out
 
     # ------------------------------------------------------------------ helpers
@@ -246,10 +266,12 @@ class MotionChecker(BaseChecker):
         d = ctx.project.editing_decisions.get(c.ai_decision_id)
         return bool(d is not None and str(getattr(d.type, "value", d.type)) == "EVIDENCE_FOCUS") or bool(c.effects.get("highlight") or c.effects.get("focus_region"))
 
-    def _readability(self, ctx: QCContext, c: Clip, t: Track, sid: str, segs: list[_Seg], cs: float, cfg, width: int) -> list:
+    def _readability(self, ctx: QCContext, c: Clip, t: Track, sid: str, segs: list[_Seg], cs: float, cfg, width: int, focus: set[str] = frozenset()) -> list:  # type: ignore[assignment]
         out = []
         limit = cfg.max_zoom_during_text
         for tt, o in ctx.clips_in(c.timeline_start, c.timeline_end, kinds=(KIND_CAPTION, KIND_TEXT, KIND_GRAPHIC)):
+            if o.kind == KIND_GRAPHIC and focus and o.metadata.get("evidence_decision") in focus:
+                continue  # the highlight the focus zoom belongs to: moving towards it is its purpose
             a, b = max(c.timeline_start, o.timeline_start), min(c.timeline_end, o.timeline_end)
             if b - a < OVERLAP_MIN:
                 continue

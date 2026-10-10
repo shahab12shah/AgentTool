@@ -193,7 +193,7 @@ def test_a_picture_gap_inside_the_narration_is_left_to_the_timeline_checker(tmp_
 def test_contract(tmp_path):
     p = new_project(tmp_path)
     c = FrameChecker()
-    assert c.expensive and not c.scene_local and c.settings_sections == ("frames",)
+    assert c.expensive and not c.scene_local and c.settings_sections == ("frames", "intentional_gaps")
     before = p.to_document()
     run_checker(c, qc_ctx(p))
     assert p.to_document() == before

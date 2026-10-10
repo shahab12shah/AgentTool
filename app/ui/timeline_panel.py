@@ -231,7 +231,7 @@ class TimelinePanel(QWidget):
             b.on(topic, lambda p: self.reload())
         b.on("project.changed", lambda p: self.reload() if p.get("scope") in ("timeline", "assets", "waveform", "editing") else None)
         b.on("project.changed", lambda p: (self.canvas.reload_qc_markers(), self._sync_marker_mode()) if p.get("scope") == "qc" else None)
-        b.on("qc.updated", lambda p: (self.canvas.reload_qc_markers(), self._sync_marker_mode()))
+        b.on("qc.updated", lambda p: None if p.get("kind") == "progress" else (self.canvas.reload_qc_markers(), self._sync_marker_mode()))  # progress ticks change no marker
         b.on("selection.changed", lambda p: (self.canvas.update(), self._update_buttons()))
         self.reload()
 

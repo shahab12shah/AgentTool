@@ -252,6 +252,23 @@ def test_api_provider_drops_malformed_parts_and_never_crashes(tmp_path):
     assert any("ignored" in n for n in out.notes)
 
 
+def test_api_answer_with_values_of_the_wrong_type_is_dropped_not_fatal():
+    """A scene id that is a list or a record used to raise TypeError (unhashable) and fail the whole checker; infinity used to pass as a confidence of 100."""
+    from app.qc.ai_editorial_checker import EditorialRequest
+
+    req = EditorialRequest(scenes=[{"id": "scene_001", "label": "1"}])
+    raw = ('{"answers": {"q1": {"verdict": "yes", "confidence": Infinity, "reason": "x"}}, "findings": ['
+           '{"code": "a_list", "title": "t", "reason": "r.", "confidence": 60, "scene_id": ["scene_001"]}, '
+           '{"code": "a_dict", "title": "t", "reason": "r.", "confidence": 60, "scene_id": {"id": "scene_001"}}, '
+           '{"code": "infinite", "title": "t", "reason": "r.", "confidence": Infinity}, '
+           '{"code": "fine_one", "title": "t", "reason": "r.", "confidence": 60, "scene_id": "scene_001"}]}')
+    rev = parse_review("x", raw, req)
+    assert [f.code for f in rev.findings] == ["fine_one"] and rev.answers == {} and any("ignored" in n for n in rev.notes)
+    for not_text in (None, {"findings": []}, b"{}"):  # a client that hands back something else than text is an unusable answer, not a crash
+        with pytest.raises(ProviderError):
+            parse_review("x", not_text, req)  # type: ignore[arg-type]
+
+
 def test_api_provider_limits_the_number_of_findings():
     from app.qc.ai_editorial_checker import EditorialRequest, MAX_FINDINGS
 

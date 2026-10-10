@@ -384,7 +384,7 @@ class TimelineCanvas(QWidget):
         if d is None:
             marker = self._hit_marker(pos)
             if marker is not None:
-                QToolTip.showText(e.globalPosition().toPoint(), f"{marker['severity'].title()} · {marker['title']}  (confidence {marker['confidence']:.0f}%)", self)
+                QToolTip.showText(e.globalPosition().toPoint(), f"{marker['severity'].title()} · {marker['title']}  (confidence {marker['confidence']:.0f}%) — from the last QC run", self)
                 self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
                 return
             hit = self._hit_clip(pos.x(), pos.y()) if pos.y() >= RULER_H else None

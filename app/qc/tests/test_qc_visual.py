@@ -176,3 +176,13 @@ def test_scene_local_contract(tmp_path):
     h1 = c.scene_input_hash(qc_ctx(p), "scene_001")
     p.qc_settings.visual.error_below = 5.0
     assert c.scene_input_hash(qc_ctx(p), "scene_001") != h1  # a changed threshold invalidates the cached scene result
+
+
+def test_a_file_name_that_says_nothing_cannot_show_a_mismatch(tmp_path):
+    """A camera or screen-recording name has no subject to compare: at most a notice, never the warning a descriptive but wrong name earns."""
+    for name in ("IMG_0042 final", "Screen Recording 2024-05-01"):
+        p, *_ = project(tmp_path / name.split()[0], [name, *TITLES[1:]])
+        i = accuracy(run(p))
+        assert len(i) == 1 and i[0].severity is Severity.NOTICE and "too little" in i[0].description
+    p, *_ = project(tmp_path / "wrong", ["city skyline timelapse", *TITLES[1:]])
+    assert accuracy(run(p))[0].severity is Severity.ERROR  # a descriptive name that does not fit stays a real finding

@@ -18,6 +18,7 @@ from app.qc import fix_catalog as fx
 from app.qc.checker_base import BaseChecker, CheckerOutput
 from app.qc.context import ProgressFn, QCContext, sha
 from app.qc.issue_model import QCCategory
+from app.qc.media_facts import extras
 from app.qc.severity import Severity
 from app.qc.style_compat import style_issue
 from app.reference.style_model import TRANSITION_SHARE_POINTS, scale
@@ -57,6 +58,10 @@ class TransitionChecker(BaseChecker):
     settings_sections = ("transition", "style")
     scene_local = False
     version = "1"
+
+    def input_hash(self, ctx: QCContext) -> str:
+        """Besides the domains: the editing style and transition frequency the usage is judged against, and the numbers / claims a transition must not run over."""
+        return sha(super().input_hash(ctx), extras(ctx, "editing", "facts"))
 
     def run(self, ctx: QCContext, report: ProgressFn) -> CheckerOutput:
         out = CheckerOutput()

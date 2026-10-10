@@ -235,9 +235,10 @@ def text_color(data: dict[str, Any]) -> str:
 def region_rect(clip: Clip) -> Rect | None:
     """The highlighted region of an evidence graphic (None when the clip draws nothing, like the renderer)."""
     hl = clip.effects.get("highlight") if isinstance(clip.effects, dict) else None
-    if not hl:
+    if not hl or not isinstance(hl, dict):
         return None
-    ev = clip.effects.get("evidence") or {}
+    ev = clip.effects.get("evidence")
+    ev = ev if isinstance(ev, dict) else {}
     region = hl.get("region") or ev.get("region") or DEFAULT_REGION
     try:
         x, y, w, h = (float(v) for v in region)

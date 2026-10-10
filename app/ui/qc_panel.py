@@ -6,7 +6,9 @@ commands; the page stays responsive because QC runs as a background job and the 
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer, Qt, Signal
+import json
+
+from PySide6.QtCore import QItemSelectionModel, QTimer, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -36,7 +38,8 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.timecode import format_timecode
-from app.qc.issue_model import GROUP_LABELS, SCORE_GROUPS, CheckerState, FixRoute, IssueStatus, QCIssue
+from app.qc.errors import QCError
+from app.qc.issue_model import GROUP_LABELS, SCORE_GROUPS, CheckerState, FixRoute, IssueStatus, QCCategory, QCIssue
 from app.qc.qc_engine import LABELS as CHECKER_LABELS
 from app.qc.qc_engine import PIPELINE
 from app.qc.settings import FIX_KINDS_CONFIRM, FIX_KINDS_SAFE, SETTING_DEFS
@@ -51,6 +54,13 @@ STATE_TEXT = {CheckerState.PENDING.value: "pending", CheckerState.RUNNING.value:
 EXPORT_TEXT = {"READY": "READY FOR EXPORT", "AVAILABLE": "EXPORT AVAILABLE", "BLOCKED": "EXPORT BLOCKED"}
 STATUS_TEXT = {"READY": "READY", "REVIEW": "REVIEW RECOMMENDED", "FIX_REQUIRED": "FIX REQUIRED", "BLOCKED": "EXPORT BLOCKED"}
 STATUS_COLOR = {"READY": "#4cc38a", "REVIEW": "#e5c04a", "FIX_REQUIRED": "#ff8a3d", "BLOCKED": "#ff4d4d"}
+try:
+    from app.qc.fix_engine import NEEDS_CONFIRM
+except ImportError:  # the fix engine is optional (analysis works without it)
+    NEEDS_CONFIRM = "This fix changes your edit: confirm it to apply."
+STATUS_FILTERS = (("Open issues", "open"), ("Fixed", "fixed"), ("Ignored", "ignored"), ("All statuses", "all"))
+CONFIDENCE_FILTERS = (("Any confidence", ""), ("High (80%+)", "high"), ("Medium (55-79%)", "medium"), ("Low (below 55%)", "low"))
+VISUAL_CATEGORIES = ("VISUAL_ACCURACY", "VISUAL_REPETITION", "CONTINUITY", "SCENE_COVERAGE", "FACT_REVIEW")
 BATCHES = (("fixSafeAll", "Fix All Safe Issues", None), ("fixCaptionTiming", "Fix All Caption Timing", "sync.caption"), ("fixDucking", "Fix All Safe Audio Ducking", "audio.insufficient_ducking"),
            ("fixMargins", "Fix All Safe Margin Issues", "caption.safe_margin"))
 
@@ -78,6 +88,9 @@ class QCPanel(QWidget):
         self._selected: str | None = None
         self._history_pick: list[int] = []
         self._loading = False
+        self._paused = False  # the page is not shown: events only mark it dirty (the main window calls refresh() when the page opens)
+        self._dirty = False
+        self._settings_key = ""  # what the settings editor was last loaded from: edits the user has not saved are never overwritten by a refresh
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(80)
@@ -179,9 +192,32 @@ class QCPanel(QWidget):
         for s in ORDER:
             self.sev_filter.addItem(PLURAL[s] if s is not Severity.CRITICAL else "Critical", s.value)
         self.sev_filter.currentIndexChanged.connect(self._fill_issues)
+        self.cat_filter = QComboBox()
+        self.cat_filter.setObjectName("qcCategoryFilter")
+        self.cat_filter.addItem("All categories", "")
+        for c in QCCategory:
+            self.cat_filter.addItem(c.value.replace("_", " ").title(), c.value)
+        self.scene_filter = QComboBox()
+        self.scene_filter.setObjectName("qcSceneFilter")
+        self.scene_filter.addItem("All scenes", "")
+        self.status_filter = QComboBox()
+        self.status_filter.setObjectName("qcStatusFilter")
+        for label, val in STATUS_FILTERS:
+            self.status_filter.addItem(label, val)
+        self.conf_filter = QComboBox()
+        self.conf_filter.setObjectName("qcConfidenceFilter")
+        for label, val in CONFIDENCE_FILTERS:
+            self.conf_filter.addItem(label, val)
+        for f in (self.cat_filter, self.scene_filter, self.status_filter, self.conf_filter):
+            f.currentIndexChanged.connect(self._fill_issues)
+        # not shown: the status filter replaced it; kept so callers that toggle "show ignored / fixed" keep working (it drives the status filter)
         self.show_closed = QCheckBox("Show ignored / fixed")
         self.show_closed.setObjectName("qcShowClosed")
-        self.show_closed.toggled.connect(self._fill_issues)
+        self.show_closed.toggled.connect(self._on_show_closed)
+        self.issues_hint = QLabel("")
+        self.issues_hint.setObjectName("qcIssuesHint")
+        self.issues_hint.setWordWrap(True)
+        self.issues_hint.setStyleSheet("color: #9aa3b2;")
         self.issue_table = self._table("qcIssues", ISSUE_COLUMNS, 0)
         self.issue_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.issue_table.itemSelectionChanged.connect(self._on_select)
@@ -191,7 +227,10 @@ class QCPanel(QWidget):
         issues_head.addWidget(QLabel("ISSUES"))
         issues_head.addStretch(1)
         issues_head.addWidget(self.sev_filter)
-        issues_head.addWidget(self.show_closed)
+        issues_head.addWidget(self.cat_filter)
+        issues_head.addWidget(self.scene_filter)
+        issues_head.addWidget(self.status_filter)
+        issues_head.addWidget(self.conf_filter)
         self.batch_btns: dict[str, QPushButton] = {}
         batch_row = QHBoxLayout()
         self.fix_selected_btn = QPushButton("Fix Selected")
@@ -213,6 +252,7 @@ class QCPanel(QWidget):
         il = QVBoxLayout(issues_box)
         il.setContentsMargins(0, 0, 0, 0)
         il.addLayout(issues_head)
+        il.addWidget(self.issues_hint)
         il.addWidget(self.issue_table, 1)
         il.addLayout(batch_row)
 
@@ -338,6 +378,19 @@ class QCPanel(QWidget):
         for w in (self.allow_override, self.run_before, self.post_render, self.ai_review):
             gf.addRow(w)
         sg.addWidget(gate)
+        checks = QGroupBox("Checks to run")
+        cl = QVBoxLayout(checks)
+        self.check_boxes: dict[str, QCheckBox] = {}
+        for cid in PIPELINE:
+            cb = QCheckBox(CHECKER_LABELS.get(cid, cid))
+            cb.setObjectName(f"qcCheck_{cid}")
+            if cid == "preflight":
+                cb.setChecked(True)
+                cb.setEnabled(False)
+                cb.setToolTip("Always runs: it protects every other check from a project that cannot be analysed")
+            self.check_boxes[cid] = cb
+            cl.addWidget(cb)
+        sg.addWidget(checks)
         self.perm_table = self._table("qcPermissions", ("Fix", "Permission"), 0)
         self.perm_combos: dict[str, QComboBox] = {}
         kinds = [*FIX_KINDS_SAFE, *FIX_KINDS_CONFIRM]
@@ -380,7 +433,15 @@ class QCPanel(QWidget):
         self.save_settings_btn = QPushButton("Save QC settings")
         self.save_settings_btn.setObjectName("qcSaveSettings")
         self.save_settings_btn.clicked.connect(self.save_settings)
-        sg.addWidget(self.save_settings_btn)
+        self.revert_settings_btn = QPushButton("Revert changes")
+        self.revert_settings_btn.setObjectName("qcRevertSettings")
+        self.revert_settings_btn.setToolTip("Discard what you changed in this form and show the saved settings again")
+        self.revert_settings_btn.clicked.connect(self.revert_settings)
+        save_row = QHBoxLayout()
+        save_row.addWidget(self.save_settings_btn)
+        save_row.addWidget(self.revert_settings_btn)
+        save_row.addStretch(1)
+        sg.addLayout(save_row)
         sg.addStretch(1)
         set_scroll = QScrollArea()
         set_scroll.setWidgetResizable(True)
@@ -399,8 +460,8 @@ class QCPanel(QWidget):
         root.addWidget(self.tabs, 1)
 
         b = ctx.bridge
-        b.on("qc.updated", lambda p: self._schedule())
-        b.on("project.changed", lambda p: self._schedule() if p.get("scope") in ("qc", "timeline", "editing", "assets", "scenes", "transcript") else None)
+        b.on("qc.updated", self._on_qc_event)
+        b.on("project.changed", lambda p: self._schedule())  # any edit can make the result stale (the QC fingerprint covers audio, captions, visuals and settings too)
         b.on("project.opened", lambda p: self._schedule())
         b.on("project.closed", lambda p: self._clear())
         b.on("job.updated", self._on_job)
@@ -427,10 +488,22 @@ class QCPanel(QWidget):
         self.ctx.status(message)
 
     def _schedule(self) -> None:
+        if self._paused:  # not on screen: rebuilding tables on every edit would only slow the editor down (refresh() runs when the page opens)
+            self._dirty = True
+            return
         self._refresh_timer.start()
+
+    def _on_qc_event(self, payload: dict) -> None:
+        if payload.get("kind") == "progress":  # many per second while a run is going: only the progress widgets change
+            if not self._paused and self.ws.project is not None:
+                self._show_progress()
+                self._sync_buttons()
+            return
+        self._schedule()
 
     def pause(self) -> None:
         self._refresh_timer.stop()
+        self._paused = True
 
     # ================================================================ running
     def run_qc(self, force: bool) -> None:
@@ -472,7 +545,7 @@ class QCPanel(QWidget):
             return
         pr = self.ws.qc.progress
         self.progress.setValue(int(pr.fraction * 100))
-        self.stage_label.setText(pr.message if pr.state != "IDLE" or pr.fraction < 1 else "")
+        self.stage_label.setText(pr.message if pr.state != "IDLE" or pr.fraction < 1 or pr.message == "Canceled" else "")  # a finished run says nothing; a canceled one says so
         self._fill_stages(pr.checkers)
 
     def _fill_stages(self, statuses: dict) -> None:
@@ -500,15 +573,25 @@ class QCPanel(QWidget):
     def _clear(self) -> None:
         self._issues = {}
         self._selected = None
+        self._history_pick = []
+        self._settings_key = ""
         for t in (self.issue_table, self.history_table, self.stages, self.group_table, self.ignored_table, self.render_table):
             t.setRowCount(0)
         self.overall_label.setText("Not analysed yet")
-        for w in (self.status_label, self.export_label, self.stale_label):
+        for w in (self.status_label, self.export_label, self.stale_label, self.stage_label, self.issues_hint):
             w.setText("")
-        self.detail.clear()
+        for sev, lab in self.count_labels.items():
+            lab.setText(f"{PLURAL[Severity(sev)]}  0")
+        self.progress.setValue(0)
+        for box in (self.detail, self.compare_view, self.render_detail):
+            box.clear()
+        self.fix_note.setText("")
         self._sync_buttons()
 
     def refresh(self) -> None:
+        """Show the current state (the main window calls this when the page opens, which also ends a pause)."""
+        self._paused = False
+        self._dirty = False
         self._refresh_now()
 
     def _refresh_now(self) -> None:
@@ -519,6 +602,7 @@ class QCPanel(QWidget):
         self._loading = True
         try:
             self._fill_scores()
+            self._fill_scene_filter()
             self._fill_issues()
             self._fill_history()
             self._fill_render_results()
@@ -549,7 +633,8 @@ class QCPanel(QWidget):
         failed = p.qc_runs[-1].get("failed", [])
         notes = []
         if stale:
-            notes.append("The project changed since this QC run: run QC again to refresh the results.")
+            notes.append("The project changed since this QC run: run QC again to refresh the results." if p.qc_runs[-1].get("content_hash")
+                         else "This QC run did not cover the whole project (a scene or category run, or a canceled run): run QC again for a complete result.")
         if failed:
             notes.append("These checks did not complete: " + ", ".join(CHECKER_LABELS.get(f, f) for f in failed) + ". Their scores are shown as — (not 100).")
         self.stale_label.setText("\n".join(notes))
@@ -562,21 +647,76 @@ class QCPanel(QWidget):
             val.setData(Qt.ItemDataRole.UserRole, g)
             self.group_table.setItem(r, 1, val)
 
+    def _fill_scene_filter(self) -> None:
+        p = self.ws.project
+        keep = self.scene_filter.currentData() or ""
+        self.scene_filter.blockSignals(True)
+        self.scene_filter.clear()
+        self.scene_filter.addItem("All scenes", "")
+        for sc in (p.scenes if p else []):
+            self.scene_filter.addItem(f"Scene {sc.label}", sc.id)
+        j = self.scene_filter.findData(keep)
+        self.scene_filter.setCurrentIndex(j if j >= 0 else 0)
+        self.scene_filter.blockSignals(False)
+
+    def _filters_active(self) -> bool:
+        return bool(self.sev_filter.currentData() or self.cat_filter.currentData() or self.scene_filter.currentData() or self.conf_filter.currentData()
+                    or (self.status_filter.currentData() or "open") != "open")
+
+    def reset_filters(self, status: str = "open") -> None:
+        """Show everything open again (or everything, with ``status='all'``): used when an issue must be found that the filters hide."""
+        for combo, val in ((self.sev_filter, ""), (self.cat_filter, ""), (self.scene_filter, ""), (self.conf_filter, ""), (self.status_filter, status)):
+            combo.blockSignals(True)
+            j = combo.findData(val)
+            combo.setCurrentIndex(j if j >= 0 else 0)
+            combo.blockSignals(False)
+        self._sync_show_closed()
+
+    def _on_show_closed(self, checked: bool) -> None:
+        j = self.status_filter.findData("all" if checked else "open")
+        self.status_filter.blockSignals(True)
+        self.status_filter.setCurrentIndex(j)
+        self.status_filter.blockSignals(False)
+        self._fill_issues()
+
+    def _sync_show_closed(self) -> None:
+        self.show_closed.blockSignals(True)
+        self.show_closed.setChecked((self.status_filter.currentData() or "open") != "open")
+        self.show_closed.blockSignals(False)
+
+    @staticmethod
+    def _passes(i: QCIssue, status: str, conf: str) -> bool:
+        ignored = i.ignored_by_user or i.status is IssueStatus.IGNORED
+        if status == "open" and not (i.status is IssueStatus.OPEN and not ignored):
+            return False
+        if status == "fixed" and i.status is not IssueStatus.FIXED:
+            return False
+        if status == "ignored" and not ignored:
+            return False
+        label = confidence_label(i.confidence)
+        return not conf or label.lower() == conf
+
     def _fill_issues(self, *_a) -> None:
         p = self.ws.project
         if p is None:
             return
-        sev = self.sev_filter.currentData() or None
-        issues = self.ws.qc.issues(severity=sev, include_ignored=self.show_closed.isChecked(), include_fixed=self.show_closed.isChecked())
+        self._sync_show_closed()
+        status = self.status_filter.currentData() or "open"
+        conf = self.conf_filter.currentData() or ""
+        closed = status != "open"
+        issues = self.ws.qc.issues(severity=self.sev_filter.currentData() or None, category=self.cat_filter.currentData() or None, scene_id=self.scene_filter.currentData() or None,
+                                   include_ignored=closed, include_fixed=closed)
+        issues = [i for i in issues if self._passes(i, status, conf)]
         self._issues = {i.issue_id: i for i in issues}
         scene_labels = {s.id: f"Scene {s.label}" for s in p.scenes}
+        keep_ids = [i for i in self._selected_ids() if i in self._issues]  # a refresh must not drop what the user selected
         keep = self._selected
         self.issue_table.blockSignals(True)
         self.issue_table.setRowCount(len(issues))
         for r, i in enumerate(issues):
-            conf = "" if i.confidence >= 99.5 else f"{i.confidence:.0f}% ({confidence_label(i.confidence)})"
+            conf_text = "" if i.confidence >= 99.5 else f"{i.confidence:.0f}% ({confidence_label(i.confidence)})"
             state = " (ignored)" if i.ignored_by_user else " (fixed)" if i.status is IssueStatus.FIXED else ""
-            vals = (i.severity.value + state, scene_labels.get(i.scene_id or "", "—") if i.scene_id else "—", fmt_time(i.start_time), i.category.value.replace("_", " ").title(), i.title, conf)
+            vals = (i.severity.value + state, scene_labels.get(i.scene_id or "", "—") if i.scene_id else "—", fmt_time(i.start_time), i.category.value.replace("_", " ").title(), i.title, conf_text)
             for c, text in enumerate(vals):
                 item = QTableWidgetItem(text)
                 item.setData(Qt.ItemDataRole.UserRole, i.issue_id)
@@ -584,11 +724,34 @@ class QCPanel(QWidget):
                     item.setForeground(QColor(COLORS[i.severity]))
                 self.issue_table.setItem(r, c, item)
         self.issue_table.blockSignals(False)
-        if keep and keep in self._issues:
-            self.select_issue(keep)
+        self._fill_hint(len(issues))
+        if keep_ids or (keep and keep in self._issues):
+            ids = keep_ids or [keep]
+            self.issue_table.blockSignals(True)
+            sm = self.issue_table.selectionModel()
+            sm.clearSelection()
+            for r in range(self.issue_table.rowCount()):
+                it = self.issue_table.item(r, 0)
+                if it is not None and it.data(Qt.ItemDataRole.UserRole) in ids:
+                    sm.select(self.issue_table.model().index(r, 0), QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+            self.issue_table.blockSignals(False)
+            self._selected = keep if keep in ids else ids[0]
+            self._show_detail(self._issues.get(self._selected))
         else:
             self._selected = None
             self._show_detail(None)
+
+    def _fill_hint(self, shown: int) -> None:
+        p = self.ws.project
+        if p is None or shown:
+            self.issues_hint.setText("")
+        elif not p.qc_runs:
+            self.issues_hint.setText("QC has not run yet: press “Run QC” to check the project.")
+        elif self._filters_active():
+            hidden = len(p.qc_issues)
+            self.issues_hint.setText(f"No issue matches the filters ({hidden} issue(s) in total). Choose “All …” in the filters to see them.")
+        else:
+            self.issues_hint.setText("No open issues." if not p.qc_runs[-1].get("failed") else "No open issues, but some checks did not complete (see the stages above).")
 
     def _fill_history(self) -> None:
         p = self.ws.project
@@ -645,9 +808,9 @@ class QCPanel(QWidget):
         return out
 
     def select_issue(self, issue_id: str) -> None:
-        """Select (and scroll to) an issue by id: used by the timeline markers."""
+        """Select (and scroll to) an issue by id: used by the timeline markers. Filters that hide it are cleared."""
         if issue_id not in self._issues:
-            self._show_closed_for(issue_id)
+            self._reveal(issue_id)
         for r in range(self.issue_table.rowCount()):
             it = self.issue_table.item(r, 0)
             if it is not None and it.data(Qt.ItemDataRole.UserRole) == issue_id:
@@ -657,13 +820,13 @@ class QCPanel(QWidget):
                 self._show_detail(self._issues.get(issue_id))
                 return
 
-    def _show_closed_for(self, issue_id: str) -> None:
+    def _reveal(self, issue_id: str) -> None:
         try:
             i = self.ws.qc.issue(issue_id)
         except Exception:  # noqa: BLE001
             return
-        if i.ignored_by_user or i.status is IssueStatus.FIXED:
-            self.show_closed.setChecked(True)
+        self.reset_filters("all" if (i.ignored_by_user or i.status is not IssueStatus.OPEN) else "open")
+        self._fill_issues()
 
     def _on_select(self) -> None:
         ids = self._selected_ids()
@@ -742,34 +905,66 @@ class QCPanel(QWidget):
         if clicked is not None and clicked.text() == "Apply":
             self.apply_fix(True)
 
+    def _confirm(self, name: str, title: str, text: str) -> bool:
+        box = QMessageBox(QMessageBox.Icon.Question, title, text, QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel, self)
+        box.setObjectName(name)
+        return box.exec() == QMessageBox.StandardButton.Ok
+
+    def _confirm_fix(self, issue: QCIssue) -> bool:
+        return self._confirm("qcConfirmFix", "Apply fix", f"{(issue.fix.summary if issue.fix else '') or issue.suggested_fix}\n\nThis changes your edit. You can undo it with Ctrl+Z.")
+
     def apply_fix(self, confirmed: bool) -> None:
         i = self._require()
         if i is None:
             return
         if i.fix is not None and not i.auto_fix_safe and not confirmed:
-            box = QMessageBox(QMessageBox.Icon.Question, "Apply fix", f"{i.fix.summary or i.suggested_fix}\n\nThis changes your edit. You can undo it with Ctrl+Z.",
-                              QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel, self)
-            box.setObjectName("qcConfirmFix")
-            if box.exec() != QMessageBox.StandardButton.Ok:
+            if not self._confirm_fix(i):
                 return
             confirmed = True
-        if self.ctx.guard(self, lambda: self.ws.qc.apply_fix(i.issue_id, confirmed=confirmed), modal=True, title="Apply fix"):
+        asked = {"again": False}
+
+        def go(ok: bool) -> None:
+            try:
+                self.ws.qc.apply_fix(i.issue_id, confirmed=ok)
+            except QCError as exc:
+                if not ok and exc.user_message == NEEDS_CONFIRM:  # the flag said safe, but the plan for the project as it is now is not: the user decides
+                    asked["again"] = True
+                    return
+                raise
+
+        done = self.ctx.guard(self, lambda: go(confirmed), modal=True, title="Apply fix")
+        if asked["again"]:
+            done = self._confirm_fix(i) and self.ctx.guard(self, lambda: go(True), modal=True, title="Apply fix")
+        if done:
             self.status("Fix applied. Undo (Ctrl+Z) restores the previous state.")
             self._refresh_now()
+
+    @staticmethod
+    def _command_fix(i: QCIssue | None) -> bool:
+        return bool(i is not None and i.status is IssueStatus.OPEN and not i.ignored_by_user and i.fix is not None and i.fix.route is FixRoute.COMMAND and i.auto_fix_available)
 
     def fix_selected(self) -> None:
         ids = self._selected_ids()
         if not ids:
             self.status("Select one or more issues first.")
             return
+        chosen = [self._issues[iid] for iid in ids if self._command_fix(self._issues.get(iid))]
+        safe = [i for i in chosen if i.auto_fix_safe]
+        careful = [i for i in chosen if not i.auto_fix_safe]
+        if careful and not self._confirm("qcConfirmFixSelected", "Apply fixes",
+                                         f"{len(careful)} of the selected fix(es) change your edit and need your confirmation:\n\n"
+                                         + "\n".join("• " + ((i.fix.summary if i.fix else "") or i.title) for i in careful[:8]) + ("\n• …" if len(careful) > 8 else "")
+                                         + "\n\nEach can be undone separately with Ctrl+Z."):
+            careful = []  # the user declined: only the safe ones go ahead
         done = 0
-        for iid in ids:
-            iss = self._issues.get(iid)
-            if iss is None or not iss.auto_fix_available or iss.fix is None or iss.fix.route is not FixRoute.COMMAND:
-                continue
-            if self.ctx.guard(self, lambda iid=iid, iss=iss: self.ws.qc.apply_fix(iid, confirmed=not iss.auto_fix_safe), modal=False, title="Fix selected"):
+        if safe:  # all the safe ones are ONE undo step
+            res = {}
+            if self.ctx.guard(self, lambda: res.update(r=self.ws.qc.apply_safe_fixes([i.issue_id for i in safe])), modal=False, title="Fix selected"):
+                done += len(res.get("r") or [])
+        for i in careful:
+            if self.ctx.guard(self, lambda iid=i.issue_id: self.ws.qc.apply_fix(iid, confirmed=True), modal=False, title="Fix selected"):
                 done += 1
-        self.status(f"Applied {done} fix(es); skipped the rest (they need another page or your decision).")
+        self.status(f"Applied {done} fix(es); skipped the rest (they need another page or your decision)." + self._skipped_note())
         self._refresh_now()
 
     def fix_safe(self, code_prefix: str | None) -> None:
@@ -786,6 +981,11 @@ class QCPanel(QWidget):
         i = self._require()
         if i is None:
             return
+        if not i.auto_fix_safe:
+            n = sum(1 for o in self._issues.values() if o.code == i.code and self._command_fix(o))
+            if not self._confirm("qcConfirmFixSimilar", "Fix all similar", f"{(i.fix.summary if i.fix else '') or i.title}\n\nThis changes your edit in up to {max(n, 1)} place(s). "
+                                 "Each one is checked again first; locked or user-made elements are skipped. One Ctrl+Z undoes them all."):
+                return
         if self.ctx.guard(self, lambda: self.ws.qc.fix_similar(i.issue_id, confirmed=not i.auto_fix_safe), modal=True, title="Fix all similar"):
             note = self._skipped_note()
             if note:
@@ -802,6 +1002,9 @@ class QCPanel(QWidget):
     def ignore(self, whole_type: bool) -> None:
         i = self._require()
         if i is None:
+            return
+        if i.severity is Severity.CRITICAL:
+            self.status("A critical issue cannot be ignored: fix it, or the export stays blocked.")
             return
         reason, ok = ask_reason(self, "Ignore this type of issue" if whole_type else "Ignore this issue")
         if not ok:
@@ -856,10 +1059,19 @@ class QCPanel(QWidget):
             self.compare_view.setPlainText("\n".join(res["c"].lines()))
 
     # ================================================================ settings
-    def _load_settings(self) -> None:
+    def _settings_fingerprint(self) -> str:
+        p = self.ws.project
+        return f"{p.project_id}:{json.dumps(p.qc_settings.to_dict(), sort_keys=True, default=str)}" if p else ""
+
+    def _load_settings(self, force: bool = False) -> None:
+        """Fill the editor from the project. A refresh (a finished run, an edit elsewhere) leaves the user's unsaved edits alone: it reloads only when the stored settings changed."""
         p = self.ws.project
         if p is None:
             return
+        key = self._settings_fingerprint()
+        if not force and key == self._settings_key:
+            return
+        self._settings_key = key
         s = p.qc_settings
         i = self.block_level.findData(s.block_level)
         if i >= 0:
@@ -868,6 +1080,8 @@ class QCPanel(QWidget):
         self.run_before.setChecked(s.run_before_export)
         self.post_render.setChecked(s.post_render_qc)
         self.ai_review.setChecked(s.ai_review_enabled)
+        for cid, box in self.check_boxes.items():
+            box.setChecked(cid == "preflight" or cid in s.enabled_checkers)
         for k, cb in self.perm_combos.items():
             j = cb.findData(s.permission(k))
             if j >= 0:
@@ -882,22 +1096,51 @@ class QCPanel(QWidget):
             else:
                 w.setValue(v)  # type: ignore[attr-defined]
 
+    def revert_settings(self) -> None:
+        self._load_settings(force=True)
+        self.status("QC settings editor reset to the saved values.")
+
     def save_settings(self) -> None:
-        changes: dict = {"block_level": self.block_level.currentData(), "allow_export_override": self.allow_override.isChecked(), "run_before_export": self.run_before.isChecked(),
-                         "post_render_qc": self.post_render.isChecked(), "ai_review_enabled": self.ai_review.isChecked()}
         p = self.ws.project
         if p is None:
             return
-        perms = dict(p.qc_settings.fix_permissions)
+        cur = p.qc_settings
+        wanted: dict = {"block_level": self.block_level.currentData(), "allow_export_override": self.allow_override.isChecked(), "run_before_export": self.run_before.isChecked(),
+                        "post_render_qc": self.post_render.isChecked(), "ai_review_enabled": self.ai_review.isChecked()}
+        perms = dict(cur.fix_permissions)
         for k, cb in self.perm_combos.items():
             perms[k] = cb.currentData()
-        changes["fix_permissions"] = perms
+        wanted["fix_permissions"] = perms
+        wanted["enabled_checkers"] = [cid for cid, box in self.check_boxes.items() if box.isChecked() or cid == "preflight"]
         for path, w in self.set_widgets.items():
-            changes[path] = w.isChecked() if isinstance(w, QCheckBox) else w.value()  # type: ignore[attr-defined]
+            wanted[path] = w.isChecked() if isinstance(w, QCheckBox) else w.value()  # type: ignore[attr-defined]
+        changes: dict = {}
+        for k, v in wanted.items():
+            try:
+                old = cur.get_path(k) if "." in k else getattr(cur, k)
+            except AttributeError:
+                old = None
+            if k == "enabled_checkers":
+                if sorted(old or []) != sorted(v):
+                    changes[k] = v
+                continue
+            same = abs(float(old) - float(v)) < 1e-9 if isinstance(v, float) and isinstance(old, (int, float)) and not isinstance(old, bool) else old == v
+            if not same:
+                changes[k] = v  # only what the user changed: saving must not round or touch anything else (and an unchanged form is not an undo step)
+        if not changes:
+            self.status("No QC settings were changed.")
+            return
         if self.ctx.guard(self, lambda: self.ws.qc.update_settings(**changes), modal=True, title="QC settings"):
             self.status("QC settings saved. Run QC again to apply the new thresholds.")
 
     # ================================================================ buttons
+    def _fixable_count(self, prefix: str | None) -> int:
+        """Open safe fixes a batch button would try (the engine re-checks each one when it runs)."""
+        p = self.ws.project
+        if p is None:
+            return 0
+        return sum(1 for i in p.qc_issues if self._command_fix(i) and i.auto_fix_safe and (not prefix or i.code.startswith(prefix)))
+
     def _sync_buttons(self) -> None:
         p = self.ws.project
         has = p is not None
@@ -908,23 +1151,29 @@ class QCPanel(QWidget):
         failed = bool(has and p.qc_runs and p.qc_runs[-1].get("failed"))
         self.retry_btn.setEnabled(has and not running and failed)
         i = self._current()
+        open_ = bool(i and i.status is IssueStatus.OPEN and not i.ignored_by_user)
         self.scene_btn.setEnabled(has and not running and bool(i and i.scene_id))
         self.category_btn.setEnabled(has and not running)
-        can_cmd = bool(i and i.fix is not None and i.fix.route is FixRoute.COMMAND and i.auto_fix_available and not running)
+        can_cmd = bool(self._command_fix(i) and not running)  # never for protected / navigate-only / already closed issues (auto_fix_available is off for those)
         self.fix_btn.setEnabled(can_cmd)
         self.preview_btn.setEnabled(can_cmd)
         self.similar_btn.setEnabled(can_cmd)
-        self.ignore_btn.setEnabled(bool(i) and not running)
-        self.ignore_type_btn.setEnabled(bool(i) and not running)
+        can_ignore = bool(open_ and not running and i.severity is not Severity.CRITICAL)  # a CRITICAL is never ignorable
+        self.ignore_btn.setEnabled(can_ignore)
+        self.ignore_type_btn.setEnabled(can_ignore)
+        why = "A critical issue cannot be ignored: fix it, or the export stays blocked." if i is not None and i.severity is Severity.CRITICAL else ""
+        self.ignore_btn.setToolTip(why)
+        self.ignore_type_btn.setToolTip(why or "Stop reporting every issue of this kind")
         self.timeline_btn.setEnabled(bool(i and i.start_time is not None))
         self.scene_open_btn.setEnabled(bool(i and i.scene_id))
-        visual = bool(i and i.scene_id and i.category.value in ("VISUAL_ACCURACY", "VISUAL_REPETITION", "CONTINUITY", "SCENE_COVERAGE", "FACT_REVIEW"))
+        visual = bool(open_ and i.scene_id and (i.category.value in VISUAL_CATEGORIES or (i.fix is not None and i.fix.kind in ("visual.replace", "visual.search_again"))))
         self.replace_btn.setEnabled(visual)
         self.search_btn.setEnabled(visual)
-        self.fix_selected_btn.setEnabled(has and bool(self._selected_ids()) and not running)
+        chosen = [self._issues.get(x) for x in self._selected_ids()]
+        self.fix_selected_btn.setEnabled(has and not running and any(self._command_fix(c) for c in chosen))
         has_fix_engine = bool(has and self.ws.qc.fixes is not None)
-        for b in self.batch_btns.values():
-            b.setEnabled(has_fix_engine and has and bool(p.qc_issues) and not running)
+        for oid, _label, prefix in BATCHES:
+            self.batch_btns[oid].setEnabled(has_fix_engine and not running and self._fixable_count(prefix) > 0)
         self.report_btn.setEnabled(bool(has and p.qc_runs))
         self.compare_btn.setEnabled(bool(has and len(p.qc_runs) >= 2))
         self.unignore_btn.setEnabled(bool(has and p.qc_ignored_issues))

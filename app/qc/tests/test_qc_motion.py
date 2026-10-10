@@ -170,3 +170,25 @@ def test_does_not_modify_the_project(tmp_path):
     before = p.to_document()
     run(p)
     assert p.to_document() == before
+
+
+def test_a_planned_evidence_focus_is_not_judged_as_decoration(tmp_path):
+    """The Phase 4 evidence focus (zoom to the region, hold, return) is the engine's own signature move: its depth and speed are the point of it. Its keyframes are owned by an
+    EVIDENCE_FOCUS decision that targets the clip; the same keyframes without that decision, or a number card shown while it moves, are still findings."""
+    from app.editing.models import Creator, DecisionType, EditingDecision
+    from app.timeline.clip import KIND_GRAPHIC, KIND_TEXT, Clip
+
+    focus = [Keyframe("scale", 0.0, 1.0, "ease_in_out", "dec_f"), Keyframe("scale", 0.7, 1.8, "ease_in_out", "dec_f")]
+    p, c, s1, s2, a = project(tmp_path, focus, duration=6.0)
+    out = run(p)
+    assert find(out, "motion.excessive_zoom") and find(out, "motion.abrupt_zoom")  # no decision behind it: ordinary decoration rules apply
+    p.editing_decisions["dec_f"] = EditingDecision("dec_f", s1.id, DecisionType.EVIDENCE_FOCUS, "focus", c.id, 0.0, 6.0, {}, "Evidence document: zoom to the relevant area.", 64.0, Creator.AI)
+    hl = Clip("hl1", "track_v4", "", 0.2, 3.0, kind=KIND_GRAPHIC, effects={"highlight": {"region": [0.1, 0.3, 0.6, 0.2]}}, metadata={"evidence_decision": "dec_f", "host_clip": c.id})
+    p.timeline.get_track("track_v4").clips.append(hl)
+    out = run(p)
+    assert [i for i in out.issues if i.code.startswith("motion.")] == []  # zoom depth, zoom speed and "moves under its own highlight" are all the plan
+    card = Clip("tx1", "track_v5", "", 0.2, 1.0, kind=KIND_TEXT, text={"content": "42%", "style": "NUMBER_CARD"})
+    p.timeline.get_track("track_v5").clips.append(card)
+    assert [i.code for i in run(p).issues] == ["motion.readability"]  # a figure the viewer has to read while the picture moves is still reported
+    c.keyframes = [Keyframe(k.property, k.time, k.value, k.interpolation, "") for k in focus]  # the user re-keyed it: their own keyframes, judged as usual
+    assert find(run(p), "motion.abrupt_zoom")

@@ -573,3 +573,14 @@ def test_renumbering_a_scene_refreshes_the_titles_that_quote_its_label(proj):
     proj.s2.label = "3"
     again = eng.run(qc_ctx(proj), previous=PreviousState(first.run.issues, first.cache))
     assert chk.seen[-1] == [proj.s2.id] and again.run.checkers["scene"].reused_scenes == 1
+
+
+def test_scene_level_metrics_merge_entry_by_entry_and_averages_are_recomputed():
+    from app.qc.qc_engine import merge_metrics
+
+    old = {"per_scene": {"s1": {"original": 90.0, "current": 80.0}, "s2": {"original": 70.0, "current": 60.0}}, "mean_current_score": 70.0, "mean_original_score": 80.0, "scenes_checked": 2}
+    new = {"per_scene": {"s2": {"original": 70.0, "current": 40.0}}, "mean_current_score": 40.0, "mean_original_score": 70.0, "scenes_checked": 1}
+    got = merge_metrics(old, new)
+    assert set(got["per_scene"]) == {"s1", "s2"} and got["per_scene"]["s1"]["current"] == 80.0 and got["per_scene"]["s2"]["current"] == 40.0
+    assert got["mean_current_score"] == 60.0 and got["mean_original_score"] == 80.0 and got["scenes_checked"] == 1
+    assert merge_metrics({"a": 1}, {"b": 2}) == {"a": 1, "b": 2}

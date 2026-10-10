@@ -29,6 +29,7 @@ from app.qc import fix_catalog as fx
 from app.qc.checker_base import BaseChecker, CheckerOutput
 from app.qc.context import ProgressFn, QCContext, sha
 from app.qc.issue_model import QCCategory, QCIssue
+from app.qc.media_facts import extras
 from app.qc.severity import Severity
 from app.research.concepts import shared_domain
 from app.timeline.clip import Clip
@@ -88,6 +89,11 @@ class ContinuityChecker(BaseChecker):
     expensive = True
     uses_shared = True  # it stands down where the visual accuracy checker has already flagged the scene
     version = "1"
+
+    def input_hash(self, ctx: QCContext) -> str:
+        """Besides the domains: the vocabulary of every picture (names, tags, researched titles), the scenes' entities and intents, the thumbnails the brightness check measures, and the
+        visual checker's findings *with* their severity (it stands down on scenes the visual checker rates WARNING or above)."""
+        return sha(super().input_hash(ctx), extras(ctx, "facts", "assets", "candidates", "thumbs", "shared_state"))
 
     # ------------------------------------------------------------------ the work
     def run(self, ctx: QCContext, report: ProgressFn) -> CheckerOutput:
@@ -319,6 +325,7 @@ class ContinuityChecker(BaseChecker):
         for k, r in enumerate(rows):
             ctx.check_cancel()
             prev, nxt = (rows[k - 1] if k > 0 else None), (rows[k + 1] if k + 1 < len(rows) else None)
+            unrelated = False
             if len(r.vterms) >= MIN_VISUAL_TERMS and flagged < MAX_PER_CODE * 3:
                 own = self._fit(r.vterms, r.sterms)
                 near = max([self._fit(r.vterms, n.sterms | n.vterms) for n in (prev, nxt) if n is not None] or [0.0])
@@ -329,9 +336,10 @@ class ContinuityChecker(BaseChecker):
                         skipped_by_visual += 1
                     else:
                         flagged += 1
+                        unrelated = True
                         out.issues.append(self._unrelated(ctx, r, prev, nxt, own, near, low))
             if prev is not None and r.scene.id not in reported:
-                flagged += self._pair(ctx, out, prev, r, cfg)
+                flagged += self._pair(ctx, out, prev, r, cfg, skip_jump=unrelated)  # one picture that belongs nowhere is one finding, not also a "subject jump" into it
         if skipped_by_visual:
             out.notes.append(f"{skipped_by_visual} unrelated visual(s) already flagged by the visual accuracy checker")
         flagged += self._styles(ctx, out, rows)
@@ -356,13 +364,13 @@ class ContinuityChecker(BaseChecker):
         iss.fingerprint = iss.make_fingerprint(iss.metrics.get("signature", "") or sha(r.scene.id, r.use.asset.id))
         return iss
 
-    def _pair(self, ctx: QCContext, out: CheckerOutput, a: _Row, b: _Row, cfg) -> int:
+    def _pair(self, ctx: QCContext, out: CheckerOutput, a: _Row, b: _Row, cfg, skip_jump: bool = False) -> int:
         n = 0
         # abrupt subject change: neither the narrations nor the pictures are related, and nothing introduces the change
         sim_text = self._fit(a.sterms, b.sterms) if a.sterms else 0.0
         sim_vis = max(self._fit(b.vterms, a.vterms), self._fit(a.vterms, b.vterms))
         lead = TRANSITION_WORDS.search(b.narration) or b.starts_section or CUTAWAY.search(b.narration) or CALLBACK.search(b.narration)
-        if a.sterms and b.sterms and sim_text < cfg.topic_jump_similarity * (1.5 - cfg.sensitivity) and sim_vis < 0.15 and not lead:
+        if not skip_jump and a.sterms and b.sterms and sim_text < cfg.topic_jump_similarity * (1.5 - cfg.sensitivity) and sim_vis < 0.15 and not lead:
             n += 1
             self._add(ctx, out, "continuity.subject_jump", Severity.NOTICE, "Abrupt change of subject", f"Scene {a.scene.label} -> {b.scene.label}: the narration and the pictures share almost no vocabulary "
                       f"({sim_text:.0%} / {sim_vis:.0%}) and nothing introduces the change.", b, 62.0, "Viewers lose the thread when the subject jumps without a signpost.", "Add a bridging sentence or visual, or ignore if the jump is intended.")

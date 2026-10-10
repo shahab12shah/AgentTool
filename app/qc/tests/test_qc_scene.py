@@ -572,3 +572,25 @@ def test_real_ai_edited_project_is_clean_and_a_removed_scene_visual_is_found(pre
     assert [i.code for i in mine if i.severity is Severity.ERROR] == ["scene.visual.not_on_timeline"]
     part = check(p, scene_filter={target.id})
     assert {i.scene_id for i in part.issues} == {target.id} and sorted(i.fingerprint for i in part.issues) == sorted(i.fingerprint for i in mine)
+
+
+def test_a_hole_the_timeline_checker_already_reports_is_reported_once(tmp_path):
+    """The same stretch was an ERROR twice: ``timeline.gap.unintended`` and ``scene.coverage.missing``. The timeline finding stays (it carries the fix); a scene without a usable visual keeps
+    its own finding, because the cause and the way out (choose a visual) are only known here."""
+    from app.qc.timeline_checker import TimelineChecker
+
+    p, scenes, assets, clips = build(tmp_path)
+    clips[1].duration = 4.0  # scene 2: its approved visual is on the timeline, but only for the first 4 of its 10 s
+
+    def both():
+        ctx = qc_ctx(p)
+        ctx.shared["timeline"] = run_checker(TimelineChecker(), ctx)
+        return ctx.shared["timeline"], run_checker(SceneChecker(), ctx)
+
+    tl, out = both()
+    assert find(tl, "timeline.gap.unintended") and find(out, "scene.coverage.missing") == []
+    assert out.metrics["scene_rows"][scenes[1].id]["uncovered_seconds"] > 5  # still measured
+    assert find(check(p), "scene.coverage.missing")  # run on its own it speaks up as before
+    p.visual_assignments[scenes[1].id] = VisualAssignment(scenes[1].id, None, assets[1].id, "AI", 0.9, False)  # chosen but never approved
+    tl, out = both()
+    assert find(tl, "timeline.gap.unintended") and find(out, "scene.coverage.missing")

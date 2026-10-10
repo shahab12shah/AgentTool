@@ -20,7 +20,7 @@ from app.qc import fix_catalog as fx
 from app.qc.checker_base import BaseChecker, CheckerOutput
 from app.qc.context import ProgressFn, QCContext, sha
 from app.qc.issue_model import QCCategory, QCIssue
-from app.qc.media_facts import UsedAsset, ffmpeg_ready, probe_used
+from app.qc.media_facts import UsedAsset, extras, ffmpeg_ready, probe_used
 from app.qc.severity import Severity
 from app.rendering import presets as P
 
@@ -45,6 +45,10 @@ class AssetChecker(BaseChecker):
     settings_sections = ("media",)
     scene_local = False
     version = "1"
+
+    def input_hash(self, ctx: QCContext) -> str:
+        """Besides the domains: the asset names / paths the findings quote, and which thumbnails exist (``media.thumbnail_missing``)."""
+        return sha(super().input_hash(ctx), extras(ctx, "assets", "thumbs"))
 
     def run(self, ctx: QCContext, report: ProgressFn) -> CheckerOutput:
         out = CheckerOutput()

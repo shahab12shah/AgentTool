@@ -244,3 +244,11 @@ def test_contract_and_no_mutation(tmp_path):
     before = p.to_document()
     run(p)
     assert p.to_document() == before
+
+
+def test_one_misplaced_picture_is_one_finding_not_also_a_subject_jump(tmp_path):
+    """The wildlife footage between two finance scenes was reported twice: as a picture that belongs nowhere and as an abrupt change of subject into it."""
+    p, scenes, *_ = sequence(tmp_path, WILD)
+    out = run(p)
+    assert [i.scene_id for i in find(out, "continuity.unrelated")] == [scenes[1].id]
+    assert [i for i in find(out, "continuity.subject_jump") if i.scene_id == scenes[1].id] == []

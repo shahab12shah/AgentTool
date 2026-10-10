@@ -110,7 +110,7 @@ def test_clean_project_has_no_audio_problem_and_pauses_are_intentional(tmp_path)
 def test_checker_contract(tmp_path):
     p, _ = audio_project(tmp_path)
     c = AudioChecker()
-    assert c.expensive and not c.scene_local and c.settings_sections == ("audio",) and {"audio", "transcript"} <= set(c.domains)
+    assert c.expensive and not c.scene_local and c.settings_sections == ("audio", "intentional_gaps") and {"audio", "transcript"} <= set(c.domains)
     before = p.to_document()
     run(p)
     assert p.to_document() == before
@@ -322,3 +322,36 @@ def test_without_ffmpeg_and_without_analysis_it_reports_what_it_can(tmp_path):
     p.timeline.get_track("track_a1").muted = True
     out = run_checker(AudioChecker(), qc_ctx(p))
     assert "audio.voice_missing" in codes(out) and out.metrics["peak_db"] is None
+
+
+def test_music_loud_wording_never_contradicts_its_own_numbers(tmp_path):
+    """A stretch above the limit under a typical level below it was described as "averages -17.5 dB (limit -8 dB)": too loud, and quieter than the limit in the same sentence."""
+    p, _ = audio_project(tmp_path)
+    music(p, volume=1.0, amp=0.45, gain_kf=duck_kf(1.0, 0.45))
+    i = find(run(p), "audio.music_loud")[0]
+    peak = i.metrics["peak_relative_db"]
+    assert peak > i.metrics["relative_db"] or peak == i.metrics["relative_db"]
+    assert "averages" not in i.description and f"{peak:+.1f} dB" in i.description and f"{peak:+.1f} dB" in i.current_value  # what is reported as too loud is the loud part
+
+
+def test_a_voice_clip_the_timeline_checker_reports_is_not_reported_again_as_cut_short(tmp_path):
+    """A voice clip that does not play in full was two ERRORs: ``timeline.voice.misaligned`` and ``audio.voice_duration``. Alone, the audio checker still says it; after the timeline checker it defers."""
+    from app.qc.checker_base import CheckerOutput
+    from app.qc.issue_model import QCCategory
+    from app.qc.timeline_checker import TimelineChecker
+
+    p, _ = audio_project(tmp_path)
+    c = p.timeline.get_track("track_a1").clips[0]
+    c.duration, c.source_out = 12.0, 12.0
+    assert find(run(p), "audio.voice_duration")
+    ctx = qc_ctx(p)
+    alone = AudioChecker().input_hash(ctx)
+    tl = run_checker(TimelineChecker(), ctx)
+    assert [i.timeline_item_id for i in find(tl, "timeline.voice.misaligned")] == [c.id]
+    ctx.shared["timeline"] = tl
+    assert find(run_checker(AudioChecker(), ctx), "audio.voice_duration") == []
+    assert AudioChecker().input_hash(ctx) != alone  # the answer depends on it, so the cache key does too
+    other = CheckerOutput(issues=[AudioChecker().issue("timeline.voice.misaligned", QCCategory.TIMELINE, Severity.ERROR, "x", clip=None)])
+    ctx2 = qc_ctx(p)
+    ctx2.shared["timeline"] = other  # reported for no clip we know of: the audio finding stays
+    assert find(run_checker(AudioChecker(), ctx2), "audio.voice_duration")

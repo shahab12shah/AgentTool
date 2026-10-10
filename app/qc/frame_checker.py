@@ -148,8 +148,8 @@ class FrameChecker(BaseChecker):
     id = "frames"
     label = "Black & frozen frames"
     categories = (QCCategory.FRAMES,)
-    domains = ("timeline", "assets", "transcript")
-    settings_sections = ("frames",)
+    domains = ("timeline", "assets", "transcript", "scenes")  # scenes: an evidence / data scene may hold a still picture
+    settings_sections = ("frames", "intentional_gaps")
     scene_local = False
     expensive = True
     version = "1"

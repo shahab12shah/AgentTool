@@ -19,13 +19,14 @@ from __future__ import annotations
 from dataclasses import replace
 
 from app.core.exceptions import AnalysisError
-from app.core.textutil import STOPWORDS, stem, tokenize
+from app.core.textutil import STOPWORDS, content_terms, stem, tokenize
 from app.editing.planners import EVIDENCE_SOURCES
 from app.media.asset import Asset, AssetType, SourceType
 from app.qc import fix_catalog as fx
 from app.qc.checker_base import BaseChecker, CheckerOutput
 from app.qc.context import ProgressFn, QCContext, sha
 from app.qc.issue_model import QCCategory, QCIssue
+from app.qc.media_facts import extras
 from app.qc.severity import Severity
 from app.research.brief import BriefBuilder
 from app.research.evaluation import MetadataEvaluator
@@ -41,6 +42,8 @@ SPECIFIC_ENTITY_TYPES = ("PERSON", "COMPANY", "ORGANIZATION", "COUNTRY", "CITY",
 EVIDENCE_TEXT = "Evidence visual may not directly support the spoken claim."
 STEP_DOWN = {Severity.ERROR: Severity.WARNING, Severity.WARNING: Severity.NOTICE, Severity.NOTICE: Severity.INFO, Severity.INFO: Severity.INFO, Severity.CRITICAL: Severity.ERROR}
 NEIGHBOUR_GAP = 20.0  # the visual must fit a neighbour this many points better than its own scene before it counts as misplaced
+GENERIC_NAME_TERMS = frozenset(stem(w) for w in ("img", "dsc", "mov", "mp4", "video", "clip", "footage", "final", "copy", "untitled", "screen", "recording", "new", "pic", "photo", "image", "file", "export", "render", "scene"))
+MIN_NAME_TERMS = 1  # a bare file is judged by its name alone: with no informative word at all ("IMG_0042", "clip1", "Screen Recording 2024-05-01") the name says nothing about the subject
 
 
 class VisualChecker(BaseChecker):
@@ -52,6 +55,16 @@ class VisualChecker(BaseChecker):
     scene_local = True
     expensive = True
     version = "1"
+
+    # ------------------------------------------------------------------ cache keys: the score reads titles / tags (assets, researched candidates) and the scene's brief (entities, claims, intent)
+    def input_hash(self, ctx: QCContext) -> str:
+        return sha(super().input_hash(ctx), extras(ctx, "facts", "assets", "candidates"))
+
+    def scene_input_hash(self, ctx: QCContext, scene_id: str) -> str:
+        scenes = ctx.scenes
+        i = next((k for k, sc in enumerate(scenes) if sc.id == scene_id), -1)
+        near = [scenes[k].id for k in (i - 1, i + 1) if i >= 0 and 0 <= k < len(scenes)]  # the neighbours' briefs move the score by up to the context cap
+        return sha(super().scene_input_hash(ctx, scene_id), extras(ctx, "facts", "assets", "candidates", scene_id=scene_id), [extras(ctx, "facts", scene_id=n) for n in near])
 
     # ------------------------------------------------------------------ the work
     def run(self, ctx: QCContext, report: ProgressFn) -> CheckerOutput:
@@ -186,6 +199,9 @@ class VisualChecker(BaseChecker):
             reason = "several signals (subject, context, action) agree only partly with the narration"
         if user_chosen:
             sev = STEP_DOWN[sev]
+        if bare and sev in (Severity.ERROR, Severity.WARNING) and self._name_terms(cand) < MIN_NAME_TERMS:
+            sev = Severity.NOTICE  # nothing to compare: a file name without a subject cannot show that the picture is wrong
+            reason += " (the file name says too little about its subject to be sure)"
         negatives = [f.lstrip("✗ ").strip() for f in score.factors if f.startswith(("✗", "⚠"))][:3]
         desc = (f"Rechecked in context: {current:.0f}/100" + (f" (research score when chosen: {original:.0f})" if original is not None else "") + f". Reason: {reason}."
                 + (f" Context: {why_ctx}." if why_ctx else "") + (" " + "; ".join(negatives) + "." if negatives else "") + " Based on titles, tags and metadata; the picture itself was not inspected."
@@ -194,6 +210,11 @@ class VisualChecker(BaseChecker):
                           fx.navigate("visual.replace" if code != "visual.weak" else "visual.search_again", "Choose another visual for this scene", scene_id=scene.id),
                           why="Pictures that do not match the words confuse viewers or undermine trust.", cat=QCCategory.VISUAL_ACCURACY, user_chosen=user_chosen,
                           extra={"components": {k: round(v, 1) for k, v in vars(comp).items()}, "reason": reason, "basis": getattr(score, "basis", "METADATA")})
+
+    @staticmethod
+    def _name_terms(cand: Candidate) -> int:
+        """How many words of the candidate's own text say something about its subject (digits and camera / editor boilerplate do not)."""
+        return sum(1 for t in content_terms(cand.text) if t not in GENERIC_NAME_TERMS and not any(ch.isdigit() for ch in t))
 
     def _generic(self, ctx: QCContext, scene, clip: Clip, track: Track, asset: Asset, cand: Candidate, brief: ResearchBrief, score: CandidateScore, current: float, original: float | None,
                  conf: float, user_chosen: bool, bare: bool) -> QCIssue | None:

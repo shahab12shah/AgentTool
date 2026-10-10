@@ -22,8 +22,9 @@ from app.presentation.assembly import PresState
 from app.presentation.validator import MAX_VOLUME, PresentationValidator
 from app.qc import fix_catalog
 from app.qc.checker_base import BaseChecker, CheckerOutput
-from app.qc.context import VISUAL_TRACK_KINDS, ProgressFn, QCContext
+from app.qc.context import VISUAL_TRACK_KINDS, ProgressFn, QCContext, sha
 from app.qc.issue_model import QCCategory, QCFixSpec, QCIssue
+from app.qc.media_facts import extras
 from app.qc.severity import Severity, worse
 from app.timeline.clip import KIND_CAPTION, KIND_GRAPHIC, KIND_MEDIA, KIND_TEXT, Clip
 from app.timeline.timeline_commands import SCALE_RANGE
@@ -251,11 +252,15 @@ class TimelineChecker(BaseChecker):
     label = "Timeline Integrity"
     categories = (QCCategory.TIMELINE,)
     # transcript: the narration-activity test (pauses are not gaps) reads the words; audio: the tolerance for "beyond the narration"
-    domains = ("timeline", "scenes", "assets", "transcript")
+    domains = ("timeline", "scenes", "assets", "transcript", "visual")  # visual: a scene marked as skipped has no picture on purpose
     settings_sections = ("intentional_gaps", "audio", "coverage", "fix_permissions")
     scene_local = False
     expensive = False
     version = "1"
+
+    def input_hash(self, ctx: QCContext) -> str:
+        """The decisions an element refers to (``timeline.orphan.decision``) are not part of the timeline hash."""
+        return sha(super().input_hash(ctx), extras(ctx, "decisions"))
 
     def run(self, ctx: QCContext, report: ProgressFn) -> CheckerOutput:
         out = CheckerOutput()
@@ -499,6 +504,7 @@ class TimelineChecker(BaseChecker):
         covered = _merge([(max(0.0, c.timeline_start), min(horizon, c.timeline_end)) for t, c in ctx.visual_clips() if _on_screen(t, c) and c.timeline_end > 0 and c.timeline_start < horizon])
         stats["covered_seconds"] = sum(b - a for a, b in covered)
         declared = [(float(g[0]), float(g[1])) for g in ctx.settings.intentional_gaps if len(g) >= 2]
+        declared += [(float(s.start), float(s.end)) for s in ctx.scenes if (a := ctx.project.visual_assignments.get(s.id)) is not None and a.skipped]  # "show no visual here" is the user's choice (scene.coverage.skipped says so)
         blank = subtract((0.0, horizon), covered)
         pieces = subtract((0.0, horizon), covered + declared)
         stats["intentional_gap_seconds"] = max(0.0, sum(b - a for a, b in blank) - sum(b - a for a, b in pieces))

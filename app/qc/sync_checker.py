@@ -16,6 +16,7 @@ Everything scene-local: only the scene's own words, clips, assignment and its im
 
 from __future__ import annotations
 
+import math
 import re
 from bisect import bisect_right
 from dataclasses import dataclass, field
@@ -23,8 +24,9 @@ from typing import TYPE_CHECKING, Any
 
 from app.qc import fix_catalog
 from app.qc.checker_base import BaseChecker, CheckerOutput
-from app.qc.context import VISUAL_TRACK_KINDS, ProgressFn, QCContext
+from app.qc.context import VISUAL_TRACK_KINDS, ProgressFn, QCContext, sha
 from app.qc.issue_model import QCCategory, QCFixSpec, QCIssue
+from app.qc.media_facts import extras
 from app.qc.settings import SyncThresholds
 from app.qc.severity import Severity
 from app.timeline.clip import KIND_CAPTION, KIND_GRAPHIC, KIND_MEDIA, KIND_TEXT, Clip
@@ -187,8 +189,8 @@ def _build_index(ctx: QCContext) -> _Index:
         if track.hidden:
             continue
         for clip in sorted(track.clips, key=lambda c: (c.timeline_start, c.id)):
-            if clip.duration <= 1e-6:
-                continue
+            if not (math.isfinite(clip.timeline_start) and math.isfinite(clip.duration)) or clip.duration <= 1e-6:
+                continue  # a non-finite time is the timeline checker's CRITICAL finding, and cannot be placed
             if clip.kind == KIND_MEDIA and track.kind in VISUAL_TRACK_KINDS:
                 slot = "visuals"
             elif clip.kind == KIND_CAPTION:
@@ -244,6 +246,13 @@ class SyncChecker(BaseChecker):
     scene_local = True
     expensive = False
     version = "1"
+
+    # ------------------------------------------------------------------ cache keys: the numbers / claims a cut or graphic is judged against, and the boundary words of the neighbouring scenes
+    def input_hash(self, ctx: QCContext) -> str:
+        return sha(super().input_hash(ctx), extras(ctx, "facts"))
+
+    def scene_input_hash(self, ctx: QCContext, scene_id: str) -> str:
+        return sha(super().scene_input_hash(ctx, scene_id), extras(ctx, "facts", "neighbours", scene_id=scene_id))
 
     # ------------------------------------------------------------------ the run
     def run(self, ctx: QCContext, report: ProgressFn) -> CheckerOutput:

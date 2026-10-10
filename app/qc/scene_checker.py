@@ -27,6 +27,7 @@ from app.qc import fix_catalog
 from app.qc.checker_base import BaseChecker, CheckerOutput
 from app.qc.context import ProgressFn, QCContext, sha
 from app.qc.issue_model import QCCategory, QCIssue
+from app.qc.media_facts import extras
 from app.qc.severity import Severity
 from app.qc.timeline_checker import _below, _finite, _merge, _on_screen, _t
 from app.timeline.clip import KIND_GRAPHIC, KIND_TEXT, Clip
@@ -127,21 +128,41 @@ class SceneChecker(BaseChecker):
     settings_sections = ("coverage", "intentional_gaps", "fix_permissions")
     scene_local = True
     expensive = False
+    uses_shared = True  # it stands down on a hole in the picture that the timeline checker already reports (same stretch, same cause)
     version = "1"
 
-    # ------------------------------------------------------------------ cache key of one scene
+    # ------------------------------------------------------------------ cache keys
+    def input_hash(self, ctx: QCContext) -> str:
+        """The scene's claims, numbers and intent (``scene.support.under_supported``) are not part of the scene hash."""
+        return sha(super().input_hash(ctx), extras(ctx, "facts"))
+
     def scene_input_hash(self, ctx: QCContext, scene_id: str) -> str:
         """``ctx.scene_signature`` plus what this checker reads beyond it: track flags (a hidden track shows nothing), who owns / locked the clips (the fix is disabled for them),
         and the evidence kind of the assignment."""
-        base = super().scene_input_hash(ctx, scene_id)
+        base = sha(super().scene_input_hash(ctx, scene_id), extras(ctx, "facts", scene_id=scene_id))
         s = ctx.scene(scene_id)
         if s is None:
             return base
+        base = sha(base, [g for g in self._timeline_gaps(ctx) if g[1] > s.start and g[0] < s.end])
         a = ctx.project.visual_assignments.get(scene_id)
         tracks = [[t.id, t.kind.value, t.hidden, t.locked] for t in ctx.timeline.tracks]
         prot = [[c.id, ctx.is_protected(t, c)[0]] for t, c in ctx.clips_in(s.start - 0.5, s.end + 0.5)]
         assets = [[x.id, x.type.value, x.source_type.value] for x in (ctx.asset(i) for i in sorted({c.asset_id for _t, c in ctx.clips_in(s.start, s.end) if c.asset_id}) + ([a.asset_id] if a and a.asset_id else [])) if x]
         return sha(base, tracks, prot, assets, [a.evidence_kind.value, a.source_type.value if a.source_type else ""] if a else None, scene_id in ctx.locked_scene_ids())
+
+    @staticmethod
+    def _timeline_gaps(ctx: QCContext) -> list[tuple[float, float]]:
+        """The holes in the picture the timeline checker has already reported (empty when it did not run before this checker)."""
+        out = ctx.shared.get("timeline")
+        return sorted((round(i.start_time, 3), round(i.end_time, 3)) for i in getattr(out, "issues", []) if i.code == "timeline.gap.unintended" and i.start_time is not None and i.end_time is not None)
+
+    def _owned_by_timeline(self, ctx: QCContext, status: str, uncovered: list[tuple[float, float]], unc_s: float) -> bool:
+        """True when the only thing wrong is a hole between pictures that the timeline checker reports (with its own fix): one problem, one finding. A scene without a usable visual keeps
+        its own finding, because the cause (nothing assigned / approved / on disk) and the way out (choose a visual) are only known here."""
+        if status in (VisualStatus.UNAPPROVED.value, VisualStatus.MISSING_MEDIA.value, VisualStatus.MISSING.value) or unc_s <= 0:
+            return False
+        gaps = self._timeline_gaps(ctx)
+        return sum(max(0.0, min(b, y) - max(a, x)) for a, b in uncovered for x, y in gaps) >= 0.9 * unc_s
 
     # ------------------------------------------------------------------ the work
     def run(self, ctx: QCContext, report: ProgressFn) -> CheckerOutput:
@@ -196,6 +217,8 @@ class SceneChecker(BaseChecker):
         not_placed = a is not None and a.approved and not skipped and bool(a.asset_id) and ctx.asset(a.asset_id) is not None and status == VisualStatus.APPROVED.value and not on_timeline
         if not_placed:
             issues.append(self._not_on_timeline(ctx, s, a, inside, main, unc_s, active_s, uncovered, ratio, short_of_ratio))
+        elif short_of_ratio and not skipped and self._owned_by_timeline(ctx, status, uncovered, unc_s):
+            row["reported_by"] = "timeline"  # measured (the metrics keep it), but reported once, as timeline.gap.unintended
         elif short_of_ratio:
             issues.append(self._missing(ctx, s, status, skipped, unc_s, active_s, uncovered, ratio, inside))
 
