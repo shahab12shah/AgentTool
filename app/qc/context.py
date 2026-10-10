@@ -37,14 +37,27 @@ class QCCancelled(Exception):
     """The user cancelled the QC run."""
 
 
+def clone_plain(v: Any) -> Any:
+    """Deep copy of a JSON-like structure (dict / list / tuple / set / primitives), several times faster than ``copy.deepcopy``; anything else falls back to it."""
+    if v is None or isinstance(v, (str, int, float, bool)):
+        return v
+    if isinstance(v, dict):
+        return {k: clone_plain(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [clone_plain(x) for x in v]
+    if isinstance(v, tuple):
+        return tuple(clone_plain(x) for x in v)
+    return copy.deepcopy(v)
+
+
 def snapshot_project(project: "Project") -> "Project":
     """A detached copy of ``project`` (same media root) that is safe to read from another thread."""
     from app.project.project import Project  # noqa: PLC0415
 
-    doc = copy.deepcopy(project.to_document())
-    for k in QC_SECTIONS:
+    doc = project.to_document()
+    for k in QC_SECTIONS:  # the snapshot never needs the previous findings: blank them BEFORE copying instead of copying and discarding
         doc[k] = {} if isinstance(doc.get(k), dict) else []
-    clone = Project.from_document(doc, root=project.root)
+    clone = Project.from_document(clone_plain(doc), root=project.root)
     clone.qc_settings = copy.deepcopy(project.qc_settings)
     return clone
 
