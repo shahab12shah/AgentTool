@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 from app.core.commands import Command
 from app.core.events import EventBus, Topics
-from app.core.exceptions import ProjectError
+from app.core.exceptions import JobCancelled, ProjectError
 from app.qc.errors import QCError
 from app.core.constants import APP_VERSION
 from app.jobs.job import Job
@@ -29,7 +29,7 @@ from app.logging.logger import get_logger, log_event
 from app.project.phase8_commands import IgnoreIssuesCommand, SetQCSettingsCommand, StoreQCRunCommand, StoreRenderQCCommand, UnignoreCommand
 from app.project.project import Project
 from app.project.project_manager import ProjectManager
-from app.qc.context import QCContext, sha
+from app.qc.context import QCCancelled, QCContext, sha
 from app.qc.issue_model import (
     CATEGORY_GROUP, CheckerStatus, IgnoreRecord, IssueStatus, QCIssue, QCRun, QCScores, now_iso, sorted_issues,
 )
@@ -566,7 +566,10 @@ class QCService:
 
         def work(jc) -> dict[str, Any]:
             ctx.cancel = jc.job.cancel_event
-            return checker.inspect(ctx, Path(output_path), render_id=render_id, expected=expected, report=lambda f, m: jc.report(f * 100.0, m))
+            try:
+                return checker.inspect(ctx, Path(output_path), render_id=render_id, expected=expected, report=lambda f, m: jc.report(f * 100.0, m))
+            except QCCancelled:  # a canceled check is a canceled job (not "Unexpected error" with a logged traceback)
+                raise JobCancelled() from None
 
         def done(job: Job) -> None:
             cur = self._projects.current

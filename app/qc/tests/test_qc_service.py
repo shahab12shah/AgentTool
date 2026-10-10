@@ -516,3 +516,19 @@ def test_two_ignores_of_the_same_issue_get_distinct_ids_even_within_one_second(q
     assert a.ignore_id != b.ignore_id and len(ws.project.qc_ignored_issues) == 2
     ws.qc.unignore(b.ignore_id)
     assert [r.ignore_id for r in ws.project.qc_ignored_issues] == [a.ignore_id] and ws.project.qc_issues[0].ignored_by_user  # the first ignore still holds
+
+
+def test_canceling_the_rendered_file_check_cancels_the_job_quietly(qws, tmp_path, monkeypatch):
+    """Regression: the check raised QCCancelled, which the job runner reported as FAILED ("Unexpected error") with a logged traceback."""
+    from app.qc import render_checker as rc
+    from app.qc.context import QCCancelled
+
+    def cancelled(self, ctx, path, **kw):  # noqa: ARG001
+        raise QCCancelled()
+
+    monkeypatch.setattr(rc.RenderedFileChecker, "inspect", cancelled)
+    out = tmp_path / "out.mp4"
+    out.write_bytes(b"x")
+    job = qws.qc.run_post_render_qc("r9", out)
+    assert qws.jobs.wait_idle(30)
+    assert job.status.value == "CANCELLED" and job.error is None and "r9" not in qws.project.render_qc_results
