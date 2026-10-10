@@ -46,6 +46,10 @@ class _Drag:
     moved: bool = False
 
 
+class _SnapList(list):
+    """A sorted list of snap times (0, the playhead and every clip edge), so the nearest one is a bisect away."""
+
+
 class TimelineCanvas(QWidget):
     playhead_changed = Signal(float)
     clip_double_clicked = Signal(str)  # asset id
@@ -55,7 +59,10 @@ class TimelineCanvas(QWidget):
     def __init__(self, ctx: UiContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.ctx = ctx
-        self.qc_markers: list[dict] = []  # derived from the project's QC issues (never stored here)
+        self._qc_markers: list[dict] = []  # derived from the project's QC issues (never stored here)
+        self._mk_sorted: list[dict] = []
+        self._mk_times: list[float] = []
+        self._mk_maxend: list[float] = []
         self.qc_selected: str | None = None
         self.pps = 80.0
         self.playhead = 0.0
@@ -63,6 +70,11 @@ class TimelineCanvas(QWidget):
         self._drop_preview: tuple[int, float, float] | None = None  # track idx, start, duration
         self._missing: set[str] = set()
         self._wf_asked: set[str] = set()
+        self._expose: tuple[float, float] = (0.0, 1e12)  # x range of the paint event in progress (waveforms only draw what is exposed)
+        self._wave_cache: dict[tuple, tuple[object, list]] = {}
+        self._elide_cache: dict[tuple, str] = {}
+        self._qcolors: dict[tuple, QColor] = {}
+        self._snap_cache: tuple[tuple, _SnapList] | None = None
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -98,15 +110,41 @@ class TimelineCanvas(QWidget):
         return RULER_H + max(1, len(self.tracks())) * ROW_H + 1
 
     def reload(self) -> None:
-        """Recompute size/missing-media cache after the project or its content changed."""
+        """Recompute size/missing-media cache after the project or its content changed. (Zoom and scroll do not come through here.)"""
         project = self.ctx.ws.project
         self._missing = {a.id for a in project.missing_assets()} if project else set()
+        self._wave_cache.clear()
         self.reload_qc_markers()
-        duration = project.timeline.duration if project else 0.0
-        self.setFixedSize(int(self.time_to_x(duration + 60)) + 200, self.content_height())
+        self._apply_size()
         self.update()
 
+    def _apply_size(self) -> None:
+        project = self.ctx.ws.project
+        duration = project.timeline.duration if project else 0.0
+        self.setFixedSize(min(MAX_WIDGET_PX, int(self.time_to_x(duration + 60)) + 200), self.content_height())
+
     # ------------------------------------------------------------ QC markers
+    @property
+    def qc_markers(self) -> list[dict]:
+        return self._qc_markers
+
+    @qc_markers.setter
+    def qc_markers(self, markers: list[dict]) -> None:
+        self._qc_markers = markers
+        self._mk_sorted = sorted(markers, key=lambda m: m["time"])
+        self._mk_times = [m["time"] for m in self._mk_sorted]
+        top, self._mk_maxend = float("-inf"), []
+        for m in self._mk_sorted:
+            e = m.get("end")
+            top = max(top, m["time"], e if e is not None else m["time"])
+            self._mk_maxend.append(top)
+
+    def _markers_between(self, t0: float, t1: float) -> list[dict]:
+        """Markers whose flag or span can touch [t0, t1] (seconds); the rest are not even looked at."""
+        hi = bisect_right(self._mk_times, t1)
+        lo = bisect_left(self._mk_maxend, t0)
+        return self._mk_sorted[lo:hi]
+
     def reload_qc_markers(self) -> None:
         """Re-read the QC markers (severity flags on the ruler; a thin span bar on the affected track). Cheap: they come from the stored issues."""
         try:
@@ -128,7 +166,8 @@ class TimelineCanvas(QWidget):
         return QRectF(self.time_to_x(m["time"]), self.row_rect_y(idx) + ROW_H - 4, max(3.0, (end - m["time"]) * self.pps), 3)
 
     def _hit_marker(self, pos) -> dict | None:
-        for m in self.qc_markers:
+        slack = 10.0 / self.pps
+        for m in self._markers_between(pos.x() / self.pps - slack, pos.x() / self.pps + slack):
             if self._marker_flag(m).adjusted(-2, 0, 2, 0).contains(pos):
                 return m
             span = self._marker_span(m)
@@ -136,10 +175,10 @@ class TimelineCanvas(QWidget):
                 return m
         return None
 
-    def _paint_qc_markers(self, p: QPainter) -> None:
+    def _paint_qc_markers(self, p: QPainter, x0: float, x1: float) -> None:
         from app.qc.severity import COLORS, Severity  # noqa: PLC0415
 
-        for m in self.qc_markers:
+        for m in self._markers_between((x0 - 8) / self.pps, (x1 + 8) / self.pps):
             col = QColor(COLORS[Severity(m["severity"])])
             span = self._marker_span(m)
             if span is not None:
@@ -153,60 +192,95 @@ class TimelineCanvas(QWidget):
 
     def set_zoom(self, pps: float) -> None:
         self.pps = max(MIN_PPS, min(MAX_PPS, pps))
-        self.reload()
+        self._apply_size()
+        self.update()
         self.zoom_changed.emit(self.pps)
 
     def set_playhead(self, seconds: float) -> None:
+        old = self.playhead
         self.playhead = max(0.0, seconds)
         self.playhead_changed.emit(self.playhead)
-        self.update()
+        h = self.height()
+        for t in (old, self.playhead):  # only the strips around the old and new playhead need repainting
+            self.update(QRect(int(self.time_to_x(t)) - 9, 0, 19, h))
 
     # ------------------------------------------------------------ painting
+    def _qcolor(self, name: str, alpha: int | None = None, darker: int | None = None) -> QColor:
+        key = (name, alpha, darker)
+        col = self._qcolors.get(key)
+        if col is None:
+            col = QColor(name)
+            if darker is not None:
+                col = col.darker(darker)
+            if alpha is not None:
+                col.setAlpha(alpha)
+            if len(self._qcolors) > 512:
+                self._qcolors.clear()
+            self._qcolors[key] = col
+        return col
+
     def paintEvent(self, event) -> None:  # noqa: N802
         c = palette(self.ctx.ws.settings.theme)
         p = QPainter(self)
+        rect = event.rect()
+        x0, x1 = float(rect.left()), float(rect.right() + 1)
+        y0, y1 = float(rect.top()), float(rect.bottom() + 1)
+        self._expose = (x0, x1)
+        p.fillRect(rect, self._qcolor(c["bg"]))
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), QColor(c["bg"]))
         project = self.ctx.ws.project
         if project is None:
             return
-        w = self.width()
+        tracks = project.timeline.tracks
         fm = QFontMetrics(self.font())
 
-        # rows
-        for i, track in enumerate(project.timeline.tracks):
+        # rows (only those the exposed rectangle touches)
+        first = max(0, int((y0 - RULER_H) // ROW_H))
+        last = min(len(tracks) - 1, int((y1 - RULER_H) // ROW_H))
+        for i in range(first, last + 1):
             y = self.row_rect_y(i)
-            p.fillRect(QRectF(0, y, w, ROW_H), QColor(c["panel"] if i % 2 == 0 else c["panel2"]))
-            p.setPen(QPen(QColor(c["border"])))
-            p.drawLine(0, int(y + ROW_H), w, int(y + ROW_H))
+            p.fillRect(QRectF(x0, y, x1 - x0, ROW_H), self._qcolor(c["panel"] if i % 2 == 0 else c["panel2"]))
+            p.setPen(QPen(self._qcolor(c["border"])))
+            p.drawLine(int(x0), int(y + ROW_H), int(x1), int(y + ROW_H))
 
-        # ruler
-        p.fillRect(QRectF(0, 0, w, RULER_H), QColor(c["panel2"]))
-        step = self._tick_step()
-        p.setPen(QColor(c["muted"]))
-        t = 0.0
-        while self.time_to_x(t) < w:
-            x = self.time_to_x(t)
-            p.drawLine(int(x), RULER_H - 8, int(x), RULER_H)
-            p.drawText(int(x) + 3, RULER_H - 11, _ruler_label(t, step))
-            t += step
-        sub = step / 5
-        t = 0.0
-        while self.time_to_x(t) < w and sub * self.pps >= 6:
-            x = self.time_to_x(t)
-            p.drawLine(int(x), RULER_H - 4, int(x), RULER_H)
-            t += sub
+        # ruler (ticks inside the exposed x range, plus a margin for labels that start left of it)
+        if y0 < RULER_H:
+            p.fillRect(QRectF(x0, 0, x1 - x0, RULER_H), self._qcolor(c["panel2"]))
+            step = self._tick_step()
+            p.setPen(self._qcolor(c["muted"]))
+            k = max(0, int((x0 - 90) / (step * self.pps)))
+            while k * step * self.pps < x1:
+                t = k * step
+                x = self.time_to_x(t)
+                p.drawLine(int(x), RULER_H - 8, int(x), RULER_H)
+                p.drawText(int(x) + 3, RULER_H - 11, _ruler_label(t, step))
+                k += 1
+            sub = step / 5
+            if sub * self.pps >= 6:
+                k = max(0, int(x0 / (sub * self.pps)))
+                while k * sub * self.pps < x1:
+                    x = self.time_to_x(k * sub)
+                    p.drawLine(int(x), RULER_H - 4, int(x), RULER_H)
+                    k += 1
 
-        # clips
+        # clips: per visible row, only the clips that overlap the exposed time range
         selected = self.ctx.ws.selected_clip_id
-        for i, track in enumerate(project.timeline.tracks):
-            for clip in track.clips:
-                if self._drag and self._drag.clip_id == clip.id and self._drag.mode != "playhead":
+        drag = self._drag if self._drag and self._drag.mode != "playhead" else None
+        t0, t1 = (x0 - 6) / self.pps, (x1 + 4) / self.pps
+        for i in range(first, last + 1):
+            track = tracks[i]
+            last_col = None
+            for clip in project.timeline.clips_in_range(track.id, t0, t1):
+                if drag and drag.clip_id == clip.id:
                     continue  # drawn as drag preview below
+                if clip.duration * self.pps < TINY_PX and clip.id != selected and clip.asset_id not in self._missing:
+                    col = int(clip.timeline_start * self.pps)
+                    if col == last_col:
+                        continue  # a run of sub-pixel clips inside one pixel column is drawn once
+                    last_col = col
                 self._paint_clip(p, c, fm, clip, i, track, clip.id == selected)
-        if self._drag and self._drag.mode != "playhead" and self._drag.orig:
-            d = self._drag
-            tracks = project.timeline.tracks
+        if drag and drag.orig:
+            d = drag
             track = tracks[d.track_index]
             self._paint_clip(p, c, fm, d.orig, d.track_index, track, True, d.start, d.end - d.start, ghost=True)
         if self._drop_preview:
@@ -216,14 +290,15 @@ class TimelineCanvas(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRoundedRect(r, 4, 4)
 
-        self._paint_qc_markers(p)
+        self._paint_qc_markers(p, x0, x1)
 
         # playhead
         x = self.time_to_x(self.playhead)
-        p.setPen(QPen(QColor(c["danger"]), 2))
-        p.drawLine(QPointF(x, 0), QPointF(x, self.height()))
-        p.setBrush(QColor(c["danger"]))
-        p.drawPolygon([QPointF(x - 6, 0), QPointF(x + 6, 0), QPointF(x, 10)])
+        if x0 - 10 <= x <= x1 + 10:
+            p.setPen(QPen(QColor(c["danger"]), 2))
+            p.drawLine(QPointF(x, 0), QPointF(x, self.height()))
+            p.setBrush(QColor(c["danger"]))
+            p.drawPolygon([QPointF(x - 6, 0), QPointF(x + 6, 0), QPointF(x, 10)])
 
     def _tick_step(self) -> float:
         for step in (0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600):
@@ -237,23 +312,26 @@ class TimelineCanvas(QWidget):
         assert project is not None
         asset = project.assets.get(clip.asset_id)
         kind = asset.type if asset else AssetType.VIDEO
-        color = QColor(c["clip_audio"] if kind is AssetType.AUDIO else c["clip_image"] if kind is AssetType.IMAGE else c["clip_video"])
+        base = c["clip_audio"] if kind is AssetType.AUDIO else c["clip_image"] if kind is AssetType.IMAGE else c["clip_video"]
         if clip.kind == "caption":
-            color = QColor("#2c8c8c")
+            base = "#2c8c8c"
         elif clip.kind == "text":
-            color = QColor("#7a5bbf")
+            base = "#7a5bbf"
         elif clip.kind == "graphic":
-            color = QColor("#b9772f")
-        if track.hidden:
-            color.setAlpha(80)
-        elif ghost:
-            color.setAlpha(190)
+            base = "#b9772f"
+        alpha = 80 if track.hidden else 190 if ghost else None
+        color = self._qcolor(base, alpha)
         r = self.clip_rect(clip, index, start, duration)
-        p.setBrush(color)
         missing = clip.asset_id in self._missing
-        pen = QPen(QColor(c["selection"]) if selected else QColor(c["danger"]) if missing else color.darker(150), 2 if selected or missing else 1)
+        if r.width() < TINY_PX and not selected and not missing:
+            p.fillRect(r, color)
+            return
+        p.setBrush(color)
+        pen = QPen(self._qcolor(c["selection"]) if selected else self._qcolor(c["danger"]) if missing else self._qcolor(base, alpha, 150), 2 if selected or missing else 1)
         p.setPen(pen)
         p.drawRoundedRect(r, 4, 4)
+        if r.width() < SMALL_PX:
+            return
         if track.locked:  # diagonal hatching
             p.save()
             p.setClipRect(r)
@@ -263,6 +341,10 @@ class TimelineCanvas(QWidget):
                 p.drawLine(QPointF(x, r.bottom()), QPointF(x + r.height(), r.top()))
                 x += 10
             p.restore()
+        if track.is_audio and clip.kind == "media" and asset is not None:
+            self._paint_waveform(p, r, clip, asset, track)
+        if r.width() < TEXT_PX:
+            return
         label = (asset.name if asset else clip.asset_id) + (" ⚠ missing" if missing else "")
         if clip.kind == "caption" and clip.text:
             label = "CC  " + str(clip.text.get("text", ""))
@@ -271,8 +353,6 @@ class TimelineCanvas(QWidget):
         elif clip.kind == "graphic":
             label = "▭ highlight"
         decision = (project.editing_decisions.get(clip.ai_decision_id) or project.presentation_decisions.get(clip.ai_decision_id)) if clip.ai_decision_id else None
-        if track.is_audio and clip.kind == "media" and asset is not None:
-            self._paint_waveform(p, r, clip, asset, track)
         tags = []
         role = clip.audio.get("role")
         if role in ("MUSIC", "SFX"):
@@ -287,15 +367,27 @@ class TimelineCanvas(QWidget):
             tags.append("⚠")  # low-confidence AI decision
         if tags:
             label = " ".join(tags) + "  " + label
-        p.setPen(QColor("#ffffff"))
+        p.setPen(self._qcolor("#ffffff"))
         p.save()
         p.setClipRect(r.adjusted(4, 0, -4, 0))
-        p.drawText(r.adjusted(6, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                   fm.elidedText(label, Qt.TextElideMode.ElideRight, int(r.width()) - 10))
+        p.drawText(r.adjusted(6, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._elided(fm, label, int(r.width()) - 10))
         p.restore()
 
+    def _elided(self, fm: QFontMetrics, label: str, width: int) -> str:
+        key = (label, width)
+        out = self._elide_cache.get(key)
+        if out is None:
+            if len(self._elide_cache) > 4096:
+                self._elide_cache.clear()
+            out = self._elide_cache[key] = fm.elidedText(label, Qt.TextElideMode.ElideRight, width)
+        return out
+
     def _paint_waveform(self, p: QPainter, r: QRectF, clip: Clip, asset, track) -> None:
-        """Waveform of the clip's source range (cached peaks, generated in a background job). Clipped buckets are drawn red."""
+        """Waveform of the part of the clip that is exposed (2 px buckets on a grid fixed to the clip, so partial repaints line up); peaks are cached per bucket range. Clipped buckets are drawn red."""
+        left, width = r.left(), r.width()
+        vis_l, vis_r = max(left, self._expose[0] - 2), min(r.right(), self._expose[1] + 2)
+        if vis_r <= vis_l or width < 3:
+            return
         try:
             wf = self.ctx.ws.presentation.waveform(asset.id, request=False)
             if wf is None:
@@ -303,10 +395,20 @@ class TimelineCanvas(QWidget):
                     self._wf_asked.add(asset.id)
                     QTimer.singleShot(0, lambda aid=asset.id: self.ctx.ws.presentation.waveform(aid))
                 return
-            if r.width() < 3:
-                return
-            n = max(1, min(4000, int(r.width() // 2)))
-            rows = wf.range(clip.source_in, clip.source_out, n)
+            j0 = int((vis_l - left) // WAVE_BUCKET_PX)
+            j1 = max(j0 + 1, int(-(-(vis_r - left) // WAVE_BUCKET_PX)))
+            span = clip.source_out - clip.source_in
+            key = (asset.id, clip.source_in, clip.source_out, round(width, 3), j0, j1)
+            hit = self._wave_cache.get(key)
+            if hit is not None and hit[0] is wf:
+                rows = hit[1]
+            else:
+                ta = clip.source_in + span * (j0 * WAVE_BUCKET_PX / width)
+                tb = clip.source_in + span * (min(width, j1 * WAVE_BUCKET_PX) / width)
+                rows = wf.range(ta, tb, j1 - j0)
+                if len(self._wave_cache) > 256:
+                    self._wave_cache.clear()
+                self._wave_cache[key] = (wf, rows)
         except Exception:  # a waveform problem must never break painting
             return
         mid, half = r.center().y(), (r.height() - 6) / 2
@@ -319,13 +421,13 @@ class TimelineCanvas(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(255, 255, 255, 38))  # silence regions
                 for a, b in analysis.silence_regions:
-                    x0, x1 = r.left() + (a - clip.source_in) / clip.speed * self.pps, r.left() + (b - clip.source_in) / clip.speed * self.pps
-                    if x1 > r.left() and x0 < r.right():
-                        p.drawRect(QRectF(max(x0, r.left()), r.top(), min(x1, r.right()) - max(x0, r.left()), r.height()))
-            step = r.width() / n
+                    x0, x1 = left + (a - clip.source_in) / clip.speed * self.pps, left + (b - clip.source_in) / clip.speed * self.pps
+                    if x1 > vis_l and x0 < vis_r:
+                        p.drawRect(QRectF(max(x0, left), r.top(), min(x1, r.right()) - max(x0, left), r.height()))
+            normal, red = QPen(QColor(255, 255, 255, 170), 1), QPen(QColor("#ff4d4d"), 1)
             for k, (mn, mx, clipped) in enumerate(rows):
-                x = r.left() + k * step
-                p.setPen(QPen(QColor("#ff4d4d") if clipped else QColor(255, 255, 255, 170), 1))
+                x = left + (j0 + k) * WAVE_BUCKET_PX
+                p.setPen(red if clipped else normal)
                 p.drawLine(QPointF(x, mid - min(1.0, abs(mx) * vol) * half), QPointF(x, mid + min(1.0, abs(mn) * vol) * half))
         finally:
             p.restore()
@@ -333,10 +435,13 @@ class TimelineCanvas(QWidget):
     # ------------------------------------------------------------ hit testing
     def _hit_clip(self, x: float, y: float) -> tuple[Clip, int, str] | None:
         idx = self.track_index_at(y)
-        if idx is None:
+        project = self.ctx.ws.project
+        if idx is None or project is None:
             return None
-        track = self.tracks()[idx]
-        for clip in reversed(track.clips):
+        track = project.timeline.tracks[idx]
+        tx = x / self.pps
+        slack = 2.0 / self.pps + 1e-6  # clips are drawn at least 2 px wide
+        for clip in reversed(project.timeline.clips_in_range(track.id, tx - slack, tx + 1e-6)):
             r = self.clip_rect(clip, idx)
             if r.contains(x, y):
                 zone = "trim_start" if x - r.left() <= EDGE_PX else "trim_end" if r.right() - x <= EDGE_PX else "move"
@@ -345,13 +450,23 @@ class TimelineCanvas(QWidget):
 
     # ------------------------------------------------------------ snapping
     def _snap_points(self, exclude_clip_id: str) -> list[float]:
-        pts = [0.0, self.playhead]
-        for clip in self.ctx.ws.project.timeline.all_clips() if self.ctx.ws.project else []:
-            if clip.id != exclude_clip_id:
-                pts += [clip.timeline_start, clip.timeline_end]
+        """0, the playhead and every clip edge but the excluded clip's, sorted. Cached per timeline revision (a drag asks for it on every mouse move)."""
+        project = self.ctx.ws.project
+        if project is None:
+            return _SnapList([0.0, self.playhead] if self.playhead > 0 else [0.0])
+        key = (id(project.timeline), project.timeline.revision, exclude_clip_id, self.playhead)
+        if self._snap_cache is not None and self._snap_cache[0] == key:
+            return self._snap_cache[1]
+        pts = _SnapList(project.timeline.snap_points(exclude_clip_id))
+        for v in (0.0, self.playhead):
+            pts.insert(bisect_left(pts, v), v)
+        self._snap_cache = (key, pts)
         return pts
 
     def _snap(self, t: float, points: list[float]) -> float:
+        if isinstance(points, _SnapList):
+            i = bisect_left(points, t)
+            points = points[max(0, i - 1): i + 1]
         best = min(points, key=lambda q: abs(q - t), default=t)
         return best if abs(best - t) * self.pps <= SNAP_PX else t
 
@@ -538,6 +653,7 @@ class TimelineCanvas(QWidget):
         self.update()
 
 
+@lru_cache(maxsize=4096)
 def _ruler_label(t: float, step: float) -> str:
     if step >= 1:
         total = int(round(t))

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
     QComboBox,
@@ -229,11 +229,28 @@ class TimelinePanel(QWidget):
         b = ctx.bridge
         for topic in ("project.opened", "project.closed"):
             b.on(topic, lambda p: self.reload())
-        b.on("project.changed", lambda p: self.reload() if p.get("scope") in ("timeline", "assets", "waveform", "editing") else None)
+        b.on("project.changed", lambda p: self.request_reload() if p.get("scope") in ("timeline", "assets", "waveform", "editing") else None)
         b.on("project.changed", lambda p: (self.canvas.reload_qc_markers(), self._sync_marker_mode()) if p.get("scope") == "qc" else None)
         b.on("qc.updated", lambda p: None if p.get("kind") == "progress" else (self.canvas.reload_qc_markers(), self._sync_marker_mode()))  # progress ticks change no marker
         b.on("selection.changed", lambda p: (self.canvas.update(), self._update_buttons()))
+        self._reload_gate = False
+        self._reload_pending = False
         self.reload()
+
+    def request_reload(self) -> None:
+        """Reload now, but fold a burst of change events inside one event-loop turn (a multi-step edit publishes one per command) into one trailing reload."""
+        if self._reload_gate:
+            self._reload_pending = True
+            return
+        self._reload_gate = True
+        QTimer.singleShot(0, self, self._release_reload_gate)
+        self.reload()
+
+    def _release_reload_gate(self) -> None:
+        self._reload_gate = False
+        if self._reload_pending:
+            self._reload_pending = False
+            self.request_reload()
 
     def _marker_mode_chosen(self, _index: int) -> None:
         mode = self.marker_mode.currentData()
@@ -251,6 +268,7 @@ class TimelinePanel(QWidget):
             self.marker_mode.blockSignals(False)
 
     def reload(self) -> None:
+        self._reload_pending = False
         self.canvas.reload()
         self._sync_marker_mode()
         self.headers.reload()
