@@ -7,7 +7,7 @@ import random
 import pytest
 
 pytest.importorskip("PySide6")
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt  # noqa: E402
+from PySide6.QtCore import QPoint, QPointF, QRect, Qt  # noqa: E402
 from PySide6.QtGui import QWheelEvent  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
@@ -124,8 +124,6 @@ def test_narrow_clip_runs_are_drawn_once_per_pixel_column(small, monkeypatch):
     window, ws, sp = small
     canvas = window.timeline_panel.canvas
     tl = ws.project.timeline
-    track = tl.get_track("track_v6")
-    n = len([c for c in track.clips if c.timeline_start < 60])
     canvas.set_zoom(5.0)
     calls = _count_paints(canvas, monkeypatch)
     # make a run of 40 clips of 1 ms each inside one pixel column on an empty extra track: they must collapse
@@ -144,7 +142,6 @@ def test_narrow_clip_runs_are_drawn_once_per_pixel_column(small, monkeypatch):
     tl.remove_track(scratch.id)
     canvas.reload()
     canvas.set_zoom(80.0)
-    assert n >= 0
 
 
 def test_hit_testing_matches_a_brute_force_scan(big):
@@ -208,8 +205,11 @@ def test_select_move_trim_split_delete_and_undo_on_a_large_timeline(big):
     # select
     QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=_pos(canvas, clip, idx))
     assert ws.selected_clip_id == cid
-    QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(int(canvas.time_to_x(1.0)), RULER_H + 5 * ROW_H + 3 * 0 + ROW_H // 2))  # an empty spot on a sparse track
-    assert ws.selected_clip_id in (None, cid) or ws.selected_clip_id != cid
+    sparse = canvas.tracks().index(tl.get_track("track_a3"))  # SFX track: nothing in the first 0.1 s
+    QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(int(canvas.time_to_x(0.05)), RULER_H + sparse * ROW_H + ROW_H // 2))
+    assert ws.selected_clip_id is None  # clicking empty space clears the selection
+    QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=_pos(canvas, clip, idx))
+    assert ws.selected_clip_id == cid
 
     # move right by ~0.4 s (inside the free gap; snapping may nudge it to a clip edge)
     c0 = _pos(canvas, tl.get_clip(cid), idx)
@@ -234,7 +234,7 @@ def test_select_move_trim_split_delete_and_undo_on_a_large_timeline(big):
     # split at the playhead through the service, then delete the right half with the keyboard path
     canvas.set_playhead(trimmed.timeline_start + trimmed.duration / 2)
     right = ws.timeline.split_clip(cid, canvas.playhead)
-    assert tl.get_clip(right.id) is right or tl.get_clip(right.id).id == right.id
+    assert tl.get_clip(right.id).id == right.id
     assert len(tl.all_clips()) == n0 + 1
     assert tl.find_clip(right.id)[0].id == "track_v4"
     ws.select_clip(right.id)
@@ -300,6 +300,8 @@ def test_zoom_scroll_and_playhead_do_not_reload(big, monkeypatch):
     window, ws, sp = big
     panel = window.timeline_panel
     canvas = panel.canvas
+    for _ in range(4):  # let reloads still queued by earlier edits drain before counting
+        QApplication.processEvents()
     counts = {"reload": 0, "markers": 0, "panel": 0}
     orig_reload, orig_markers, orig_panel = canvas.reload, canvas.reload_qc_markers, panel.reload
 
@@ -389,7 +391,6 @@ def test_waveform_painting_is_bounded_by_the_exposed_width_and_cached(big, monke
 
     wf = FakeWave()
     monkeypatch.setattr(ws.presentation, "waveform", lambda asset_id, request=True: wf)
-    voice_idx = [t.id for t in canvas.tracks()].index("track_a1")
     x0 = int(canvas.time_to_x(1000.0))  # deep inside a 3000 s voice-over clip (240,000 px wide)
     rect = QRect(x0, 0, 500, canvas.height())
     canvas.grab(rect)
@@ -397,7 +398,6 @@ def test_waveform_painting_is_bounded_by_the_exposed_width_and_cached(big, monke
     first = len(calls)
     canvas.grab(rect)
     assert len(calls) == first  # identical repaint: the peaks come from the cache
-    del voice_idx
 
 
 def test_reload_after_edits_keeps_size_and_index_consistent(big):

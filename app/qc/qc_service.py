@@ -438,6 +438,8 @@ class QCService:
                     res.cache[INCREMENTAL_KEY] = self._baseline_record(ctx, project_id, rev0, epoch0)
                 except Exception:  # noqa: BLE001  (the baseline only speeds up the next run; without it that run is simply a full one)
                     _log.warning("QC baseline could not be recorded", exc_info=True)
+            if trigger == "incremental":  # what the run actually re-analysed, next to what the plan expected (shown in the run record)
+                res.run.scope.setdefault("incremental", {})["scenes"] = {cid: [c.analyzed_scenes, c.reused_scenes] for cid, c in res.run.checkers.items() if c.analyzed_scenes or c.reused_scenes}
             holder["r"] = res
             return res
 

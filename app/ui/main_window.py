@@ -27,6 +27,7 @@ from app.core.constants import APP_NAME
 from app.ui.context import UiContext
 from app.ui.dialogs.message import ask_save_changes, show_error
 from app.ui.dialogs.recovery_dialog import RecoveryDialog
+from app.ui.dialogs.performance_dialog import PerformanceDialog
 from app.ui.dialogs.settings_dialog import SettingsDialog
 from app.ui.export_panel import ExportPanel
 from app.ui.qc_panel import QCPanel
@@ -144,6 +145,7 @@ class MainWindow(QMainWindow):
         self.redo_action = act("Redo", self.redo, None, "Redo (Ctrl+Shift+Z)")
         self.redo_action.setShortcuts([QKeySequence("Ctrl+Shift+Z"), QKeySequence("Ctrl+Y")])
         self.settings_action = act("Settings", self.open_settings, QKeySequence("Ctrl+,"))
+        self.performance_action = act("Performance", self.open_performance)
 
         file_menu = self.menuBar().addMenu("&File")
         for a in (self.new_action, self.open_action, self.save_action, self.save_as_action, self.close_action):
@@ -158,6 +160,7 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.redo_action)
         edit_menu.addSeparator()
         edit_menu.addAction(self.settings_action)
+        edit_menu.addAction(self.performance_action)
 
     def _build_toolbar(self) -> None:
         bar = QToolBar("Main")
@@ -455,6 +458,10 @@ class MainWindow(QMainWindow):
     def redo(self) -> None:
         self.script_panel.flush()
         self.ctx.guard(self, self.ws.redo)
+
+    def open_performance(self) -> None:
+        dlg = PerformanceDialog(self.ws, self)
+        dlg.exec()
 
     def open_settings(self) -> None:
         dlg = SettingsDialog(self.ws.settings, self.ws.describe_ffmpeg, self.ws.transcripts.provider_report, self.ws.research.provider_report, self)
