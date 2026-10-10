@@ -141,6 +141,7 @@ class Project:
     qc_history: list[dict[str, Any]] = field(default_factory=list)  # archived runs (scores, compact issues, fixes, ignored) for comparison
     qc_cache: dict[str, Any] = field(default_factory=dict)  # checker -> {input_hash, scene_hashes}: lets a later run reuse unchanged analysis
     render_qc_results: dict[str, dict[str, Any]] = field(default_factory=dict)  # render id -> rendered-file QC result
+    performance_overrides: dict[str, Any] = field(default_factory=dict)  # Phase 9: per-project overrides of the global PerformanceSettings (only the keys the user changed; additive, no schema change)
     schema_version: int = SCHEMA_VERSION
     application_version: str = APP_VERSION
     # Runtime-only state (never serialised):
@@ -326,6 +327,7 @@ class Project:
             "qc_cache": copy.deepcopy(self.qc_cache),
             "render_qc_results": copy.deepcopy(self.render_qc_results),
             "counters": {"asset": self.assets.counter},
+            **({"performance_overrides": copy.deepcopy(self.performance_overrides)} if self.performance_overrides else {}),
         }
 
     @classmethod
@@ -392,6 +394,7 @@ class Project:
                 qc_history=copy.deepcopy(doc["qc_history"]),
                 qc_cache=copy.deepcopy(doc["qc_cache"]),
                 render_qc_results=copy.deepcopy(doc["render_qc_results"]),
+                performance_overrides=copy.deepcopy(doc.get("performance_overrides") or {}) if isinstance(doc.get("performance_overrides"), dict) else {},
                 assets=AssetRegistry(
                     [Asset.from_dict(a) for a in doc["assets"]], counter=int((doc.get("counters") or {}).get("asset", 0))
                 ),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +41,8 @@ class Settings:
     ai_image_model: str = "gpt-image-1"
     ai_image_key_env: str = "OPENAI_API_KEY"
     chromium_path: str = ""  # empty = auto-detect
+    # Phase 9: performance (see app.performance.settings.PerformanceSettings; stored as a plain dict so this module stays dependency-free)
+    performance: dict = field(default_factory=dict)
 
     def sanitized(self) -> "Settings":
         """Return a copy with out-of-range values replaced by safe ones."""
@@ -59,6 +61,8 @@ class Settings:
         if s.transcription_provider not in ("auto", "faster-whisper", "api", "pocketsphinx"):
             s.transcription_provider = "auto"
         s.use_proxies = bool(s.use_proxies)
+        if not isinstance(s.performance, dict):
+            s.performance = {}
         return s
 
 
