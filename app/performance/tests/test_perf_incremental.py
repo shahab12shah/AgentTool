@@ -239,7 +239,6 @@ def test_a_command_it_does_not_understand_is_never_guessed_narrow(env):
     assert cs.unknown and cs.all_scenes and set(BROAD_TIMELINE) <= cs.domains
     cs = env.run(_MysteryElsewhere())
     assert cs.unknown and cs.all_scenes and set(QC_DOMAINS) <= cs.domains  # not even the scope is known: everything QC reads
-    assert "layout:*" in {x for x in []} or True
     spy: SpyCache = env.cache
     assert "scene:" in spy.prefixes and "layout:" in spy.prefixes  # nothing is known about it: every scene-keyed cache entry goes
     r0 = env.tr.revision

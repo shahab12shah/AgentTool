@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.performance import bottleneck_report as report
-from app.performance.settings import CACHE_CATEGORIES, MB, PROXY_PROFILE_RESOLUTION, PerformanceSettings
+from app.performance.settings import CACHE_CATEGORIES, PerformanceSettings
 from app.ui.dialogs.message import show_error
 
 PROFILE_LABELS = {"power_saver": "Power Saver", "balanced": "Balanced", "performance": "Performance"}

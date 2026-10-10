@@ -150,8 +150,7 @@ def test_a_complete_run_records_a_compact_baseline_and_nothing_is_stale(baseline
     assert all(isinstance(v, str) and len(v) <= 14 for v in b["scenes"].values()) and b["epoch"] == ws.changes.epoch
     assert ws.qc.qc_staleness() == {"stale": False, "scene_ids": [], "domains": [], "reason": "", "source": "tracker", "unknown_change": False}
     assert ws.qc.plan_incremental().mode == "none" and ws.qc.run_incremental_qc() is None  # nothing to do: no new run
-    n = len(p.qc_runs)
-    assert len(p.qc_runs) == n and ws.qc.export_gate().run_current
+    assert ws.qc.export_gate().run_current
 
 
 @needs_ffmpeg
@@ -245,17 +244,15 @@ def test_without_a_baseline_the_run_is_a_full_one_and_still_correct(tmp_path, me
         assert ws.qc.plan_incremental().mode == "full"  # QC never ran
         job = run(ws, incremental=True)
         assert job is not None and ws.project.qc_runs[-1]["trigger"] == "incremental" and ws.project.qc_runs[-1]["content_hash"]
-        first = outcome(ws)
         del ws.project.qc_cache["_incremental"]  # a project saved by an older version / a baseline that is gone
         cap = next(c for t in ws.project.timeline.tracks for c in t.clips if c.kind == "caption" and c.scene_id == sid(2))
         ws.timeline.trim_clip(cap.id, new_end=cap.timeline_end - 0.2)
         plan = ws.qc.plan_incremental()
-        assert plan.mode == "full" and "baseline" not in plan.reason.lower() or plan.mode == "full"
+        assert plan.mode == "full" and plan.source == "none"  # nothing to compare with: every check runs (unchanged analysis is still re-used inside the engine)
         assert run(ws, incremental=True) is not None
         inc = outcome(ws)
         run(ws, force=True)
         assert inc["issues"] == outcome(ws)["issues"] and inc["scores"] == outcome(ws)["scores"]
-        assert first["issues"] != inc["issues"] or True
     finally:
         ws.shutdown()
 
