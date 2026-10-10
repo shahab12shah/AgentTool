@@ -201,6 +201,14 @@ class FFmpegService:
                 cache[n] = ok
         return {n: cache.get(n, False) for n in names}
 
+    def seed_hardware_encoders(self, results: dict[str, bool]) -> None:
+        """Pre-fill the test-encode cache from a previous run (HardwareCapabilityService's on-disk cache) so a restart does not repeat the tests. Names already tested stay as they are."""
+        exe = self.ffmpeg()
+        with self._lock:
+            cache = self._hw.setdefault(exe, {})
+            for n, ok in results.items():
+                cache.setdefault(str(n), bool(ok))
+
     def forget(self) -> None:
         """Drop cached detection (after the user changed the FFmpeg path in Settings)."""
         with self._lock:

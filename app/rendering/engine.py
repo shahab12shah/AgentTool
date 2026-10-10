@@ -33,6 +33,7 @@ class RenderEngine:
         self.probe = MediaProbeService(self.ffmpeg)
         self.fonts = FontResolver(fallback_font)
         self.selector = EncoderSelector(self.ffmpeg)
+        self.hardware = self.selector.hardware  # shared with the selector; give it a cache_path to keep test results across restarts
         self.planner = RenderPlanner(self.selector)
         self.validator = RenderValidator(self.ffmpeg, self.probe)
         self.executor = RenderExecutor(self.ffmpeg, self.probe, self.fonts, self.validator)
@@ -49,6 +50,7 @@ class RenderEngine:
     def reconfigure(self) -> None:
         """Settings changed (FFmpeg path): forget what was detected."""
         self.ffmpeg.forget()
+        self.hardware.forget()
 
     # ------------------------------------------------------------------ run
     def run(self, spec: JobSpec, cancel: threading.Event, on_progress: Callable[[RenderProgress], None], checkpoint: Callable[[], None] | None = None) -> RenderResult:

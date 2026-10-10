@@ -63,6 +63,10 @@ class JobError(AppError):
     """Invalid job operation."""
 
 
+class RecoverableJobError(AppError):
+    """A job function raises this for a transient failure (busy file, momentary resource shortage). Only jobs submitted with ``retries=N`` are retried."""
+
+
 class JobCancelled(Exception):
     """Raised inside a job function when cancellation was requested."""
 

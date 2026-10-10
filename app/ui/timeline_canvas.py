@@ -6,9 +6,11 @@ stores anything in display units. Edits are committed through ``TimelineService`
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
+from functools import lru_cache
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import QMenu, QToolTip, QWidget
 
@@ -25,6 +27,11 @@ RULER_H = 28
 EDGE_PX = 7
 SNAP_PX = 8
 MIN_PPS, MAX_PPS = 5.0, 600.0
+TINY_PX = 3.0  # clips narrower than this are flat fills (and runs of them inside one pixel column are drawn once)
+SMALL_PX = 14.0  # below this: outline only, no hatching / tags / text / waveform
+TEXT_PX = 30.0  # text needs at least this much room
+WAVE_BUCKET_PX = 2.0
+MAX_WIDGET_PX = (1 << 24) - 1  # QWIDGETSIZE_MAX
 
 
 @dataclass

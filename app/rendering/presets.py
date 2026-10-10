@@ -49,6 +49,36 @@ SPEED_PRESET = {
 HW_QUALITY = {"draft": 34, "standard": 28, "high": 23, "maximum": 19}
 
 
+def resolve_quality(s: RenderSettings, encoder: str, hardware: bool) -> tuple[int, str]:
+    """(constant-quality value, speed preset) for ``encoder``. Hardware encoders use their own scale (``HW_QUALITY``), never libx264's CRF table."""
+    base_q = "high" if s.quality == "custom" else s.quality
+    custom = s.quality == "custom" and bool(s.crf)
+    if hardware:
+        return (s.crf if custom else HW_QUALITY[base_q]), s.encoder_preset
+    return (s.crf if custom else CRF[encoder][base_q]), (s.encoder_preset or SPEED_PRESET[encoder][base_q])
+
+
+def hw_rate_args(encoder: str, q: int, bitrate_kbps: int = 0, preset: str = "") -> list[str]:
+    """Rate-control options for a hardware encoder: NVENC ``-rc vbr -cq``, QSV ``-global_quality``, AMF ``-rc cqp -qp_i/-qp_p``, VideoToolbox ``-q:v`` (an explicit bitrate wins)."""
+    args: list[str] = []
+    if "nvenc" in encoder:
+        args += ["-preset", preset or "p5", "-rc", "vbr", "-cq", str(q), "-b:v", f"{bitrate_kbps}k" if bitrate_kbps else "0"]
+    elif "qsv" in encoder:
+        args += ["-global_quality", str(q), "-preset", preset or "slow"]
+        if bitrate_kbps:
+            args += ["-b:v", f"{bitrate_kbps}k"]
+    elif "amf" in encoder:
+        args += ["-quality", "quality", "-rc", "cqp", "-qp_i", str(q), "-qp_p", str(q)] if not bitrate_kbps else ["-b:v", f"{bitrate_kbps}k"]
+    elif "videotoolbox" in encoder:
+        args += ["-b:v", f"{bitrate_kbps}k"] if bitrate_kbps else ["-q:v", str(max(1, min(100, 100 - q * 2)))]
+    return args
+
+
+def hw_kind(encoder: str) -> str:
+    """``nvenc | qsv | amf | videotoolbox`` for a hardware encoder name, ``cpu`` for anything else."""
+    return next((k for k in ("nvenc", "qsv", "amf", "videotoolbox") if k in encoder), "cpu")
+
+
 @dataclass(frozen=True)
 class ExportPreset:
     id: str
@@ -125,22 +155,18 @@ class ResolvedOutput:
     notes: list[str] = field(default_factory=list)  # why choices were made (shown in the preflight and written to the log)
 
     def video_args(self) -> list[str]:
-        e, q = self.encoder, self.crf
         keyint = str(max(2, int(round(self.fps * 2))))
+        tail = ["-g", keyint, "-pix_fmt", self.pix_fmt]
         if self.hardware:
-            args = ["-c:v", e]
-            if "nvenc" in e:
-                args += ["-preset", self.speed_preset or "p5", "-rc", "vbr", "-cq", str(q), "-b:v", f"{self.bitrate_kbps}k" if self.bitrate_kbps else "0"]
-            elif "qsv" in e:
-                args += ["-global_quality", str(q), "-preset", self.speed_preset or "slow"]
-                if self.bitrate_kbps:
-                    args += ["-b:v", f"{self.bitrate_kbps}k"]
-            elif "amf" in e:
-                args += ["-quality", "quality", "-rc", "cqp", "-qp_i", str(q), "-qp_p", str(q)] if not self.bitrate_kbps else ["-b:v", f"{self.bitrate_kbps}k"]
-            elif "videotoolbox" in e:
-                args += ["-b:v", f"{self.bitrate_kbps}k"] if self.bitrate_kbps else ["-q:v", str(max(1, min(100, 100 - q * 2)))]
-            return args + ["-g", keyint, "-pix_fmt", self.pix_fmt] + (["-tag:v", "hvc1"] if "hevc" in e and self.container == "mp4" else [])
-        args = ["-c:v", e]
+            return ["-c:v", self.encoder, *self.rate_args(), *tail, *(["-tag:v", "hvc1"] if "hevc" in self.encoder and self.container == "mp4" else [])]
+        return ["-c:v", self.encoder, *self.rate_args(), *tail]
+
+    def rate_args(self) -> list[str]:
+        """Quality / rate-control / speed options of the chosen encoder (everything between ``-c:v <encoder>`` and ``-g``). Each encoder family has its own vocabulary: libx264's ``-crf`` is never reused for a hardware encoder."""
+        e, q = self.encoder, self.crf
+        if self.hardware:
+            return hw_rate_args(e, q, self.bitrate_kbps, self.speed_preset)
+        args: list[str] = []
         rate = ["-b:v", f"{self.bitrate_kbps}k", "-maxrate", f"{int(self.bitrate_kbps * 1.5)}k", "-bufsize", f"{self.bitrate_kbps * 2}k"] if self.bitrate_kbps else []
         if e == "libx264":
             args += ["-preset", self.speed_preset, *(rate or ["-crf", str(q)]), "-profile:v", "high"]
@@ -157,7 +183,7 @@ class ResolvedOutput:
             args += ["-cpu-used", self.speed_preset, "-row-mt", "1", *(rate or ["-crf", str(q), "-b:v", "0"])]
         else:
             args += rate or ["-crf", str(q)]
-        return args + ["-g", keyint, "-pix_fmt", self.pix_fmt]
+        return args
 
     def audio_args(self) -> list[str]:
         a = ["-c:a", self.audio_encoder, "-ar", str(self.sample_rate), "-ac", "2"]

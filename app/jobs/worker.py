@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from app.core.exceptions import AppError, JobCancelled
+from app.core.exceptions import AppError, JobCancelled, RecoverableJobError
 from app.jobs.job import Job, JobStatus, _now
 from app.logging.logger import get_logger, log_event
 
@@ -50,10 +50,13 @@ def run_job(job: Job, notify: NotifyFn) -> None:
     job.started_at = _now()
     job.finished_at = None
     job.error = None
+    job.retry_pending = False
     job.attempts += 1
     notify(job)
     log_event(_log, "job.started", job_id=job.id, job_type=job.type, title=job.title)
     try:
+        if job.cancel_requested:  # cancelled between being picked and starting
+            raise JobCancelled()
         job.result = job.func(JobContext(job, notify))
         if job.cancel_requested:
             raise JobCancelled()
@@ -62,6 +65,20 @@ def run_job(job: Job, notify: NotifyFn) -> None:
     except JobCancelled:
         job.status = JobStatus.CANCELLED
         job.message = "Cancelled"
+    except RecoverableJobError as exc:
+        job.last_error = exc.user_message
+        if job.cancel_requested:
+            job.status = JobStatus.CANCELLED
+            job.message = "Cancelled"
+        elif job.auto_retries_used < job.retries:
+            job.retry_pending = True  # the manager re-queues it (status stays RUNNING until then); cancellation still wins
+            job.message = f"{exc.user_message} Retrying…"
+            _log.warning("Job failed (will retry): %s", exc, extra={"job_id": job.id, "job_type": job.type, "details": exc.details})
+        else:
+            job.status = JobStatus.FAILED
+            job.error = exc.user_message
+            job.message = exc.user_message
+            _log.warning("Job failed: %s", exc, extra={"job_id": job.id, "job_type": job.type, "details": exc.details})
     except AppError as exc:
         job.status = JobStatus.FAILED
         job.error = exc.user_message
@@ -74,4 +91,4 @@ def run_job(job: Job, notify: NotifyFn) -> None:
         _log.exception("Job crashed", extra={"job_id": job.id, "job_type": job.type})
     finally:
         job.finished_at = _now()
-    log_event(_log, "job.finished", job_id=job.id, job_type=job.type, status=job.status.value)
+    log_event(_log, "job.retry_scheduled" if job.retry_pending else "job.finished", job_id=job.id, job_type=job.type, status=job.status.value)

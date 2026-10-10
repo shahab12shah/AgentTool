@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from dataclasses import replace
 
+from app.logging.logger import get_logger, log_event
+from app.performance.hardware import HardwareCapabilityService, select_backend
 from app.project.project_schema import RenderSettings
 from app.rendering import presets as P
 from app.rendering.errors import EncoderUnavailableError, RenderError
@@ -13,37 +15,37 @@ from app.rendering.models import ChunkPlan, RenderPlan, RenderSnapshot, has_audi
 from app.timeline.clip import KIND_CAPTION, KIND_GRAPHIC, KIND_MEDIA, KIND_TEXT
 from app.timeline.track import TrackKind
 
+_log = get_logger(__name__)
 MAX_LAYERS_PER_CHUNK = 40
 FINAL_CHUNK_SECONDS = 30.0
 PREVIEW_CHUNK_SECONDS = 12.0
 
 
 class EncoderSelector:
-    """Settings -> a concrete encoder, never silently changing the user's codec choice."""
+    """Settings -> a concrete encoder, never silently changing the user's codec choice. The hardware/CPU decision is ``select_backend`` (app.performance.hardware)."""
 
-    def __init__(self, ffmpeg: FFmpegService) -> None:
+    def __init__(self, ffmpeg: FFmpegService, hardware: HardwareCapabilityService | None = None) -> None:
         self.ff = ffmpeg
+        self.hardware = hardware or HardwareCapabilityService(ffmpeg)
+        self._logged: tuple | None = None
 
     def resolve(self, s: RenderSettings, snapshot: RenderSnapshot, *, force_cpu: bool = False) -> P.ResolvedOutput:
         problems = P.compatibility_problems(s)
         if problems:
             raise RenderError(problems[0], stage="Validating Project", kind="invalid_settings", details="; ".join(problems))
         caps = self.ff.capabilities()
-        notes: list[str] = []
         codec = s.video_codec
         soft = next((e for e in P.SOFTWARE_ENCODERS[codec] if e in caps.encoders), "")
-        mode = "cpu" if force_cpu else s.hardware_acceleration
-        hw_enc = ""
-        if mode in ("auto", "hardware"):
-            working = self.ff.hardware_encoders(P.HARDWARE_ENCODERS.get(codec, []))
-            hw_enc = next((e for e in P.HARDWARE_ENCODERS.get(codec, []) if working.get(e)), "")
-            if not hw_enc:
-                if mode == "hardware":
-                    raise RenderError(f"No working hardware encoder was found for {P.CODEC_LABELS[codec]} on this computer.", stage="Validating Project", kind="hardware_unavailable",
-                                      possible_issue="The GPU or its driver is not available to FFmpeg.", can_fallback_cpu=bool(soft))
-                notes.append("Hardware encoding is not available here; using the CPU encoder.")
-        use_hw = bool(hw_enc)
-        encoder = hw_enc if use_hw else soft
+        w, h = P.output_size(snapshot.canvas_w, snapshot.canvas_h, s.resolution)
+        fps = s.fps or snapshot.fps
+        choice = select_backend(s, None, self.ff, self.hardware, force_cpu=force_cpu, output_size=(w, h), fps=fps)
+        self._log_choice(choice, codec)
+        if choice.outcome == "hardware_unavailable":
+            raise RenderError(f"No working hardware encoder was found for {P.CODEC_LABELS[codec]} on this computer.", stage="Validating Project", kind="hardware_unavailable",
+                              possible_issue="The GPU or its driver is not available to FFmpeg.", can_fallback_cpu=bool(soft))
+        notes = list(choice.notes) if choice.hardware or choice.outcome == "cpu_fallback" else []
+        use_hw = choice.hardware
+        encoder = choice.encoder
         if not encoder:
             alts = [P.CODEC_LABELS[c] for c in P.CODECS if any(e in caps.encoders for e in P.SOFTWARE_ENCODERS[c]) and c != codec]
             raise EncoderUnavailableError(f"{P.CODEC_LABELS[codec]} encoding is not available in this FFmpeg build.", alts,
@@ -52,18 +54,22 @@ class EncoderSelector:
         if a_enc not in caps.encoders:
             alts = [P.AUDIO_LABELS[a] for a, e in (("aac", "aac"), ("opus", "libopus"), ("flac", "flac")) if e in caps.encoders and a != s.audio_codec]
             raise EncoderUnavailableError(f"{P.AUDIO_LABELS[s.audio_codec]} audio encoding is not available in this FFmpeg build.", alts, kind="unsupported_codec")
-        w, h = P.output_size(snapshot.canvas_w, snapshot.canvas_h, s.resolution)
-        fps = s.fps or snapshot.fps
         q = s.quality
-        base_q = "high" if q == "custom" else q
-        if use_hw:
-            crf = s.crf if (q == "custom" and s.crf) else P.HW_QUALITY[base_q]
-            preset = s.encoder_preset
-        else:
-            crf = s.crf if (q == "custom" and s.crf) else P.CRF[encoder][base_q]
-            preset = s.encoder_preset or P.SPEED_PRESET[encoder][base_q]
+        crf, preset = P.resolve_quality(s, encoder, use_hw)
         return P.ResolvedOutput(w, h, fps, s.container, codec, encoder, use_hw, s.audio_codec, a_enc, s.audio_bitrate_kbps, s.audio_sample_rate, q, "yuv420p", crf,
                                 s.bitrate_kbps if q == "custom" else 0, preset, notes)
+
+    def _log_choice(self, c, codec: str) -> None:
+        """One structured line per distinct decision (resolve runs many times: preflight, QC, start). No paths or project content."""
+        sig = (c.requested, c.kind, c.encoder, c.outcome, c.reason, codec)
+        if sig == self._logged:
+            return
+        self._logged = sig
+        if c.outcome == "ok":
+            log_event(_log, "render.backend_selected", backend=c.kind, encoder=c.encoder, requested=c.requested, reason=c.reason, codec=codec)
+        else:
+            log_event(_log, "render.hardware_fallback" if c.outcome == "cpu_fallback" else "render.hardware_unavailable", requested=c.requested, reason=c.reason, codec=codec,
+                      cpu_encoder=(c.fallback.encoder if c.fallback else c.encoder))
 
 
 def plan_chunks(snapshot: RenderSnapshot, fps: int, target_seconds: float, layer_counter=None, max_seconds: float | None = None) -> list[ChunkPlan]:

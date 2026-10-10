@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any
 
 from app.media.asset import AssetType
+from app.timeline.index import bump, watched
 from app.timeline.clip import Clip
 
 
@@ -30,6 +31,13 @@ class Track:
     solo: bool = False
     volume: float = 1.0  # audio tracks: track gain
     clips: list[Clip] = field(default_factory=list)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "clips":
+            value = watched(value)
+        object.__setattr__(self, name, value)
+        if name in ("clips", "id"):
+            bump()
 
     @property
     def is_audio(self) -> bool:

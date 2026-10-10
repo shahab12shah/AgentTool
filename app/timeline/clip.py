@@ -6,6 +6,7 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.timeline.index import CLIP_WATCHED, bump
 from app.timeline.keyframes import Keyframe
 
 KIND_MEDIA, KIND_TEXT, KIND_GRAPHIC, KIND_CAPTION = "media", "text", "graphic", "caption"
@@ -39,6 +40,11 @@ class Clip:
     audio: dict[str, Any] = field(default_factory=dict)
     transition: dict[str, Any] | None = None  # transition INTO this clip
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+        if name in CLIP_WATCHED:
+            bump()  # tells every TimelineIndex that geometry/identity changed in place
 
     @property
     def timeline_end(self) -> float:
