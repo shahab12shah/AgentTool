@@ -16,5 +16,5 @@ agenttool = "app.main:main"
 include = ["app*"]
 
 [tool.pytest.ini_options]
-testpaths = ["app/tests", "app/qc/tests"]
+testpaths = ["app/tests", "app/qc/tests", "app/performance/tests"]
 addopts = "-q"
