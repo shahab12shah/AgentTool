@@ -34,7 +34,7 @@ def pump(cond, timeout: float = 20.0) -> None:
         QApplication.processEvents()
         if cond():
             return
-        QTest.qWait(10)
+        time.sleep(0.01)  # not QTest.qWait: PySide6 6.11 keeps the GIL there, which starves Python worker threads (the Phase 7 numpy analysis then never finishes)
     raise AssertionError("condition not met in time")
 
 
@@ -57,6 +57,8 @@ def win(qapp, app_paths, monkeypatch):
     window.ws.close_project()
     window.ws.shutdown()
     window.close()
+    window.deleteLater()  # a window left alive is re-polished by every later setStyleSheet, so a long module gets slower with every test
+    QApplication.processEvents()
 
 
 def create_project(win, tmp_path, name="Acceptance"):
