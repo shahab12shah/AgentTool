@@ -23,10 +23,37 @@ from PySide6.QtCore import QItemSelectionModel, QPoint, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QCheckBox, QInputDialog, QMessageBox  # noqa: E402
 
-from app.tests.test_ui_acceptance import create_project, pump, qapp, win  # noqa: E402,F401  (fixtures)
+from app.tests.test_ui_acceptance import create_project, pump, qapp  # noqa: E402,F401  (fixtures)
 from app.ui.timeline_canvas import RULER_H  # noqa: E402
 
 pytestmark = needs_ffmpeg
+
+
+@pytest.fixture
+def win(qapp, app_paths, monkeypatch):
+    """The real main window, like the Phase 1 acceptance fixture, but DESTROYED after each test: a window that stays alive makes the application style sheet (re-applied by every
+    new window) re-polish every earlier window as well, so a module with many window tests would slow down quadratically instead of staying at a few seconds per test."""
+    import gc
+
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication
+
+    from app.main import create_window
+
+    errors: list[str] = []
+    monkeypatch.setattr("app.ui.dialogs.message.show_error", lambda parent, message, details=None, title="": errors.append(message))
+    monkeypatch.setattr("app.ui.main_window.show_error", lambda parent, message, details=None, title="": errors.append(message))
+    window, ws = create_window(app_paths)
+    window.show()
+    window.test_errors = errors
+    yield window
+    ws.close_project()
+    ws.shutdown()
+    window.close()
+    window.deleteLater()
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    QApplication.processEvents()
+    gc.collect()
 
 
 class Fake(BaseChecker):
