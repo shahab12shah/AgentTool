@@ -10,7 +10,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from app.performance.profiler import Profiler
 from app.performance.resource_monitor import ResourceMonitor
