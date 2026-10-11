@@ -86,6 +86,7 @@ def import_all(win, media_dir):
     ws = win.ws
     pump(lambda: len(ws.project.assets) == 3 and ws.project.voice_over.asset_id is not None)
     settle(ws)
+    pump(lambda: win.library.list.count() == 3)  # the asset browser coalesces bursts of changes into one refresh (a short timer)
 
 
 def clip_center(win, clip) -> QPoint:
