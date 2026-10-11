@@ -313,6 +313,8 @@ def test_failed_thumbnails_get_a_clear_state_are_not_retried_in_a_loop_and_log_o
     ws.media.ensure_all_thumbnails()
     assert ws.jobs.wait_idle(60)
     assert len(spy.calls) == first_round  # the failures were remembered: no retry loop
+    eventually(lambda: [m for m in statuses if "thumbnail" in m])
+    time.sleep(0.6)
     summaries = [m for m in statuses if "thumbnail" in m]
     assert len(summaries) == 1 and "6 thumbnail" in summaries[0]  # one aggregated message instead of six
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
@@ -752,6 +754,7 @@ class FrameEnv:
 def fenv(tmp_path):
     jm = JobManager(EventBus(), max_workers=4)
     e = FrameEnv(tmp_path, jm)
+    e.fp._limits_get = lambda: SimpleNamespace(prefetch_frames=6, idle_work=True, foreground_workers=1)  # one extraction at a time: deterministic ordering
     yield e
     e.close()
     jm.shutdown()
@@ -809,7 +812,7 @@ def test_concurrent_requests_for_the_same_frame_share_one_extraction(fenv):
     e.gate = threading.Event()
     got = []
     for _ in range(8):
-        assert e.fp.request(e.asset, 5.1, got.append) is None
+        assert e.fp.request(e.asset, 5.1, lambda p: got.append(p)) is None
     eventually(lambda: e.calls)
     e.gate.set()
     assert e.fp._jobs.wait_idle(10)

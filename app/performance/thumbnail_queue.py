@@ -24,6 +24,7 @@ from app.performance.profiler import profiler
 _log = get_logger(__name__)
 VISIBLE, REQUESTED, IDLE = 0, 1, 2
 _MAX_FAILED = 5000
+IDLE_SETTLE_S = 0.4
 PRIORITY_CLASS = {Priority.HIGH: VISIBLE, Priority.MEDIUM: REQUESTED, Priority.LOW: IDLE}
 
 
@@ -428,8 +429,18 @@ class PriorityWorkQueue:
             return not self._tasks and self._running == 0 and (self.stats.batch_done or self.stats.batch_failed) > 0
 
     def _notify_idle(self) -> None:
+        """The batch looks finished: report it once the queue has stayed idle for a moment (a burst of requests that is faster than the worker must not produce several reports)."""
         with self._lock:
             if self._tasks or self._running:
+                return
+            mark = self.stats.started
+        t = threading.Timer(IDLE_SETTLE_S, self._settle, args=(mark,))
+        t.daemon = True
+        t.start()
+
+    def _settle(self, mark: int) -> None:
+        with self._lock:
+            if self._closed or self._tasks or self._running or self.stats.started != mark or not (self.stats.batch_done or self.stats.batch_failed):
                 return
             snap = QueueStats(**{**self.stats.__dict__, "batch_reasons": dict(self.stats.batch_reasons)})
             self.stats.batch_done = self.stats.batch_failed = 0

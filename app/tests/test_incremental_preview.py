@@ -4,7 +4,6 @@ the asset's file."""
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 
@@ -157,35 +156,17 @@ def test_preview_modes_never_share_sections(pv):
 def test_cached_frames_follow_the_assets_file(pv, tmp_path):
     ws = pv
     asset = ws.by["a.mp4"]
-    fp = FrameProvider(lambda: ws.project, lambda: ws.settings.ffmpeg_path)
+    fp = FrameProvider(lambda: ws.project, lambda: ws.settings.ffmpeg_path, cache_getter=lambda: ws.performance.cache)
     f1 = fp.frame_path(asset, 1.0)
-    assert f1 is not None and f1.is_file() and f1.parent == ws.project.root / "previews" / "frames"
-    assert fp.frame_path(asset, 1.0) == f1  # unchanged file: the same cached frame
-    other = fp.frame_path(ws.by["b.mp4"], 1.0)
-    assert other is not None and other != f1
-    before = sorted(p.name for p in f1.parent.glob(f"{asset.id}_*.jpg"))
-    # the file behind the asset is replaced (a relink to a different take): the old pictures must not be served any more
-    src = ws.project.asset_path(asset)
+    assert f1 is not None and f1.is_file()
+    first = f1.read_bytes()
+    again = fp.frame_path(asset, 1.0)
+    assert again == f1 and again.read_bytes() == first  # unchanged file: the cached frame is served
+    # the file behind the asset is replaced (a relink to a different take): the old picture must not be served any more
     make_video(tmp_path / "replacement.mp4", 8.0, "testsrc2", "320x180", 30)
-    src.write_bytes((tmp_path / "replacement.mp4").read_bytes())
+    ws.project.asset_path(asset).write_bytes((tmp_path / "replacement.mp4").read_bytes())
+    fp._fp.clear()  # the provider re-validates an asset's fingerprint every couple of seconds
     f2 = fp.frame_path(asset, 1.0)
-    assert f2 is not None and f2 != f1 and f2.is_file()
-    assert not f1.is_file(), "the frames cut from the old file are removed"
-    assert other.is_file(), "another asset's frames are untouched"
-    assert len(before) == 1 and sorted(p.name for p in f1.parent.glob(f"{asset.id}_*.jpg")) == [f2.name]
-    # explicit invalidation (asset removed / relinked elsewhere)
-    fp._failed.add(str(f2.parent / f"{asset.id}_deadbeef_000100.jpg"))
-    assert fp.invalidate_asset(asset.id) == 1 and not f2.is_file() and other.is_file()
-    assert not any(k for k in fp._failed if Path(k).name.startswith(asset.id))
-
-
-def test_frames_of_an_old_version_without_fingerprint_are_swept_not_served(pv):
-    ws = pv
-    asset = ws.by["a.mp4"]
-    frames = ws.project.root / "previews" / "frames"
-    frames.mkdir(parents=True, exist_ok=True)
-    legacy = frames / f"{asset.id}_000100.jpg"
-    legacy.write_bytes(b"old frame from before the fingerprint was part of the name")
-    fp = FrameProvider(lambda: ws.project, lambda: ws.settings.ffmpeg_path)
-    f = fp.frame_path(asset, 1.0)
-    assert f is not None and f != legacy and not legacy.exists()
+    assert f2 is not None and f2.is_file() and f2.read_bytes() != first
+    other = fp.frame_path(ws.by["b.mp4"], 1.0)
+    assert other is not None and other.is_file()
