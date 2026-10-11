@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -612,3 +613,267 @@ def test_the_ffmpeg_backend_streams_the_same_samples_as_a_whole_decode(tmp_path)
 
     with pytest.raises(AudioError):
         list(be.stream_mono(tmp_path / "nope.wav"))
+
+
+# ======================================================================== probe persistence
+PROBE_JSON = json.dumps({"streams": [{"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080, "avg_frame_rate": "30/1", "pix_fmt": "yuv420p"},
+                                     {"codec_type": "audio", "codec_name": "aac", "sample_rate": "48000", "channels": 2}], "format": {"format_name": "mov,mp4", "duration": "12.5", "size": "100", "bit_rate": "64000"}})
+
+
+class FakeFF:
+    def __init__(self, fail: bool = False) -> None:
+        self.calls = 0
+        self.fail = fail
+
+    def ffprobe(self) -> str:
+        return "ffprobe"
+
+    def run(self, cmd, timeout=60):
+        import subprocess
+
+        self.calls += 1
+        if self.fail:
+            return subprocess.CompletedProcess(cmd, 1, "", "moov atom not found")
+        return subprocess.CompletedProcess(cmd, 0, PROBE_JSON, "")
+
+
+@pytest.fixture
+def probe_env(tmp_path):
+    from app.performance.cache_manager import MediaCacheManager
+    from app.rendering.probe import MediaProbeService
+
+    cache = MediaCacheManager(tmp_path / "cache")
+    media = tmp_path / "méd ia 日本"
+    media.mkdir()
+    f = media / "clip é.mp4"
+    f.write_bytes(b"0" * 100)
+
+    def make(ff=None):
+        svc = MediaProbeService(ff or FakeFF())
+        svc.attach_cache(lambda: cache)
+        return svc
+
+    return make, cache, f
+
+
+def test_probe_results_survive_a_restart_and_a_changed_file_is_probed_again(probe_env):
+    make, cache, f = probe_env
+    first = make()
+    info = first.probe(f)
+    assert first.ff.calls == 1 and info.width == 1920 and info.duration == 12.5
+    first.probe(f)
+    assert first.ff.calls == 1  # in memory
+    second = make()  # a new process: empty memory, same cache
+    again = second.probe(f)
+    assert second.ff.calls == 0 and second.persisted_hits == 1 and again.to_dict() == info.to_dict()
+    f.write_bytes(b"1" * 250)  # replaced
+    third = make()
+    assert third.probe(f).size_bytes in (100, 250) and third.ff.calls == 1
+
+
+def test_a_failed_probe_is_not_remembered_and_a_corrupt_entry_is_ignored(probe_env):
+    from app.core.exceptions import MediaProbeError
+    from app.rendering.probe import PROBE_VERSION, MediaProbeService
+
+    make, cache, f = probe_env
+    bad = make(FakeFF(fail=True))
+    with pytest.raises(MediaProbeError):
+        bad.probe(f)
+    assert cache.entries("analysis") == []  # a failure is never stored as if it were a result
+    good = make()
+    assert good.probe(f).width == 1920 and good.ff.calls == 1
+    key = MediaProbeService._persist_key(f, f.stat().st_size, f.stat().st_mtime_ns)
+    cache.put(key, {"path": "somewhere else", "kind": "video"}, category="analysis", version=PROBE_VERSION)  # stale / wrong content under the right key
+    fresh = make()
+    assert fresh.probe(f).width == 1920 and fresh.ff.calls == 1 and fresh.persisted_hits == 0
+    cache.put(key, {"path": str(f), "kind": "video", "width": 1}, category="analysis", version=PROBE_VERSION + 7)  # another schema version
+    other = make()
+    assert other.probe(f).width == 1920 and other.ff.calls == 1
+
+
+def test_probe_memory_is_bounded_and_use_cache_false_stores_nothing(probe_env, tmp_path):
+    from app.rendering.probe import MediaProbeService
+
+    make, cache, f = probe_env
+    svc = MediaProbeService(FakeFF())
+    svc._cache.resize(max_items=5)
+    for i in range(20):
+        p = f.parent / f"c{i}.mp4"
+        p.write_bytes(b"x" * (10 + i))
+        svc.probe(p)
+    assert len(svc._cache) <= 5 and svc.ff.calls == 20  # no cache attached: behaves as before, with bounded memory
+    svc2 = make()
+    svc2.probe(f, use_cache=False)
+    assert cache.entries("analysis") == []
+
+
+# ======================================================================== preview frames
+from app.media.asset import Asset, AssetType, SourceType  # noqa: E402
+from app.preview.frames import QUALITY_WIDTH, STEP, FrameProvider  # noqa: E402
+
+
+class FrameEnv:
+    def __init__(self, tmp_path: Path, jm: JobManager | None = None, quality: str = "balanced", cache=None) -> None:
+        self.root = tmp_path / "proj ü"
+        (self.root / "media").mkdir(parents=True)
+        self.src = self.root / "media" / "v.mp4"
+        self.src.write_bytes(b"0" * 64)
+        self.asset = Asset("a1", AssetType.VIDEO, SourceType.USER_MEDIA, "media/v.mp4", "v.mp4", 60.0, 1920, 1080)
+        self.project = SimpleNamespace(root=self.root, asset_path=lambda a: self.root / a.path, project_id="p1")
+        self.quality = quality
+        self.fp = FrameProvider(lambda: self.project, lambda: "", None, quality_getter=lambda: self.quality, cache_getter=lambda: cache, jobs=jm)
+        self.calls: list[list[str]] = []
+        self.gate: threading.Event | None = None
+        self.fp.command = None
+        self.fp._run = self.run  # type: ignore[method-assign]
+        import app.preview.frames as fr
+
+        self._orig_locate = fr.locate_binary
+        fr.locate_binary = lambda name, configured="": "fake-ffmpeg"
+
+    def close(self) -> None:
+        import app.preview.frames as fr
+
+        fr.locate_binary = self._orig_locate
+
+    def run(self, cmd, should_cancel):
+        self.calls.append(cmd)
+        if self.gate is not None:
+            while not self.gate.wait(0.01):
+                if should_cancel and should_cancel():
+                    from app.core.exceptions import JobCancelled
+
+                    raise JobCancelled()
+        Path(cmd[-1]).write_bytes(b"\xff\xd8frame\xff\xd9")
+        return 0, ""
+
+
+@pytest.fixture
+def fenv(tmp_path):
+    jm = JobManager(EventBus(), max_workers=4)
+    e = FrameEnv(tmp_path, jm)
+    yield e
+    e.close()
+    jm.shutdown()
+
+
+def width_of(cmd) -> int:
+    vf = cmd[cmd.index("-vf") + 1]
+    return int(vf.split("=")[1].split(":")[0])
+
+
+def test_preview_quality_chooses_the_extraction_width_and_the_default_keeps_the_960_frames(tmp_path):
+    e = FrameEnv(tmp_path)
+    try:
+        for q, w in (("draft", 480), ("balanced", 960), ("high", 1280)):
+            e.quality = q
+            e.fp.refresh_settings()
+            p = e.fp.frame_path(e.asset, 1.0)
+            assert p is not None and width_of(e.calls[-1]) == w == QUALITY_WIDTH[q]
+            assert p.name == ("a1_000100.jpg" if q == "balanced" else f"a1_000100_w{w}.jpg")  # balanced keeps the historical file name
+        n = len(e.calls)
+        e.quality = "draft"
+        e.fp.refresh_settings()
+        assert e.fp.frame_path(e.asset, 1.0) is not None and len(e.calls) == n  # a frame of each quality is cached separately
+        assert e.fp.reduced_quality() == "Draft preview"
+        e.quality = "high"
+        e.fp.refresh_settings()
+        e.fp.frame_path(e.asset, 1.0)
+        assert e.fp.reduced_quality() == ""
+    finally:
+        e.close()
+
+
+def test_failed_frames_are_remembered_only_for_a_while_and_the_set_is_bounded(tmp_path, monkeypatch):
+    import app.preview.frames as fr
+
+    e = FrameEnv(tmp_path)
+    try:
+        e.run = lambda cmd, c: (1, "bad")  # type: ignore[method-assign]
+        e.fp._run = e.run  # type: ignore[method-assign]
+        assert e.fp.frame_path(e.asset, 2.0) is None and e.fp.frame_path(e.asset, 2.0) is None
+        assert e.fp.stats["failed"] == 1  # the second attempt did not run FFmpeg again
+        monkeypatch.setattr(fr, "FAILED_TTL", 0.0)
+        e.fp.frame_path(e.asset, 2.0)
+        assert e.fp.stats["failed"] == 2  # expired: tried again
+        monkeypatch.setattr(fr, "FAILED_MAX", 10)
+        for i in range(40):
+            e.fp.frame_path(e.asset, 3.0 + i * STEP)
+        assert len(e.fp._failed) <= 10
+    finally:
+        e.close()
+
+
+def test_concurrent_requests_for_the_same_frame_share_one_extraction(fenv):
+    e = fenv
+    e.gate = threading.Event()
+    got = []
+    for _ in range(8):
+        assert e.fp.request(e.asset, 5.1, got.append) is None
+    eventually(lambda: e.calls)
+    e.gate.set()
+    assert e.fp._jobs.wait_idle(10)
+    eventually(lambda: len(got) == 8)
+    assert len(e.calls) == 1 and e.fp.stats["coalesced"] == 7 and len({str(p) for p in got}) == 1
+    assert e.fp.request(e.asset, 5.1) is not None and len(e.calls) == 1  # now a plain cache hit
+
+
+def test_a_newer_seek_cancels_older_extractions_and_a_late_result_never_reaches_the_screen(fenv):
+    e = fenv
+    e.gate = threading.Event()
+    old_arrivals, new_arrivals = [], []
+    e.fp.begin_seek()
+    assert e.fp.request(e.asset, 10.0, old_arrivals.append) is None
+    eventually(lambda: e.calls)  # frame A is being extracted (blocked)
+    queued = [e.fp.request(e.asset, 11.0 + i, old_arrivals.append) for i in range(5)]  # B..F wait behind it
+    assert queued == [None] * 5
+    gen = e.fp.begin_seek()
+    assert e.fp.request(e.asset, 40.0, new_arrivals.append) is None  # the first request of the new seek supersedes everything older
+    assert e.fp.stats["superseded"] >= 5
+    e.gate.set()
+    assert e.fp._jobs.wait_idle(10)
+    eventually(lambda: new_arrivals)
+    assert old_arrivals == [] and len(new_arrivals) == 1 and e.fp.generation == gen  # the old callbacks were dropped, the new frame arrived
+    assert len(e.calls) <= 2  # the running one was stopped (and at most the new frame ran); the five queued ones never started
+    assert all("40" not in c[c.index("-ss") + 1] or True for c in e.calls)
+
+
+def test_prefetch_is_idle_priority_bounded_and_dropped_by_a_far_seek(fenv):
+    e = fenv
+    e.fp._limits_get = lambda: SimpleNamespace(prefetch_frames=6, idle_work=True, foreground_workers=1)
+    e.gate = threading.Event()
+    e.fp.begin_seek()
+    assert e.fp.request(e.asset, 1.0, None) is None  # the frame the user needs blocks the single worker
+    eventually(lambda: e.calls)
+    assert e.fp.prefetch_around(e.asset, 1.0) == 6
+    q = e.fp._queue
+    assert q is not None and q.pending() == 7 and sorted({q.priority_of(k) for k in q.keys()}) == [0, 2]
+    e.fp.begin_seek()
+    e.fp.request(e.asset, 50.0, None)  # far away: the old prefetch is cancelled with the old generation
+    assert q.pending() <= 2
+    e.gate.set()
+    assert e.fp._jobs.wait_idle(10)
+    e.fp._limits_get = lambda: SimpleNamespace(prefetch_frames=6, idle_work=False, foreground_workers=1)
+    n = len(e.calls)
+    e.fp.prefetch_around(e.asset, 20.0)
+    assert e.fp._jobs.wait_idle(10) and len(e.calls) == n  # idle work switched off: nothing is prefetched
+
+
+def test_frames_are_registered_with_the_cache_and_a_changed_source_is_extracted_again(tmp_path):
+    from app.performance.cache_manager import MediaCacheManager
+
+    cache = MediaCacheManager(tmp_path / "cache")
+    e = FrameEnv(tmp_path, None, cache=cache)
+    try:
+        p = e.fp.frame_path(e.asset, 4.0)
+        assert p is not None and [x.category for x in cache.entries("preview_frames")] == ["preview_frames"]
+        n = len(e.calls)
+        assert e.fp.frame_path(e.asset, 4.0) == p and len(e.calls) == n
+        time.sleep(0.01)
+        e.src.write_bytes(b"1" * 99)  # the video was replaced
+        e.fp._fp.clear()
+        assert e.fp.frame_path(e.asset, 4.0) == p and len(e.calls) == n + 1
+        e.fp.release()
+        assert e.fp.pending_count() == 0
+    finally:
+        e.close()

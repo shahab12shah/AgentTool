@@ -162,8 +162,12 @@ def bench_ui(sp: SyntheticProject) -> dict[str, float]:
         canvas.grab()
         out["ui.timeline_first_paint_s"] = time.perf_counter() - t
         out["ui.timeline_paint_s"] = _best(canvas.grab, 3)
+        from PySide6.QtCore import QRect
+
+        out["ui.timeline_viewport_paint_s"] = _best(lambda: canvas.grab(QRect(0, 0, 1600, canvas.height())), 3)  # what a user sees: one screen of a possibly very wide widget
         canvas.set_zoom(canvas.pps * 4)
         out["ui.timeline_paint_zoomed_s"] = _best(canvas.grab, 3)
+        out["ui.timeline_viewport_paint_zoomed_s"] = _best(lambda: canvas.grab(QRect(0, 0, 1600, canvas.height())), 3)
         rng = random.Random(3)
         pts = [(rng.uniform(0, 1500), rng.uniform(30, canvas.content_height())) for _ in range(200)]
         out["ui.hit_test_ms"] = 1000 * _best(lambda: [canvas._hit_clip(x, y) for x, y in pts], 3) / len(pts)

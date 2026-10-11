@@ -135,7 +135,11 @@ class ProxyManager:
     def refs(self) -> dict[str, ProxyRef]:
         """Usable proxies as the snapshot sees them."""
         out = {}
+        off = self.perf_settings().proxy_policy == "off"  # proxies switched off: nothing reads them (previews use the originals)
         for k, r in self.records().items():
+            if off:
+                out[k] = ProxyRef(r.proxy_path, r.proxy_resolution, "NONE", r.width, r.height, r.source_size, r.source_mtime_ns)
+                continue
             out[k] = ProxyRef(r.proxy_path, r.proxy_resolution, r.proxy_status if self._fresh(r) else "STALE", r.width, r.height, r.source_size, r.source_mtime_ns)
         return out
 
@@ -147,7 +151,7 @@ class ProxyManager:
     def proxy_path_for(self, asset: Asset) -> Path | None:
         """The proxy to show while editing (None = use the original)."""
         r = self.record(asset.id)
-        if r and self._fresh(r) and self._original_unchanged(asset, r):
+        if r and self._fresh(r) and self._original_unchanged(asset, r) and self.perf_settings().proxy_policy != "off":
             return Path(r.proxy_path)
         return None
 
@@ -214,8 +218,10 @@ class ProxyManager:
         return rec
 
     def generate(self, asset_ids: list[str] | None = None, resolution: str | None = None, only_large: bool = True, regenerate: bool = False, *,
-                 priority: Priority = Priority.MEDIUM, automatic: bool = False) -> list[Job]:
+                 priority: Priority = Priority.MEDIUM, automatic: bool = False, force: bool = False) -> list[Job]:
         project = self._project()
+        if self.perf_settings().proxy_policy == "off" and not force:
+            raise RenderError("Proxies are switched off for this project. Change the proxy policy to Manual or Automatic to create them.", stage="Proxy", kind="proxies_off")
         res = resolution or project.render_settings.proxy_resolution
         if res not in PROXY_RESOLUTIONS:
             raise RenderError(f"Unsupported proxy size “{res}”. Use 540p, 720p or 1080p.", kind="invalid_settings")

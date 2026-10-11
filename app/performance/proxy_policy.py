@@ -91,7 +91,7 @@ def peak_layers(project: Any) -> int:
     events: list[tuple[float, int]] = []
     try:
         for track in project.timeline.tracks:
-            if getattr(track.kind, "value", str(track.kind)).lower() != "video":
+            if getattr(track.kind, "value", str(track.kind)).lower() not in ("video", "image"):
                 continue
             for c in track.clips:
                 if c.asset_id and c.duration > 0:
