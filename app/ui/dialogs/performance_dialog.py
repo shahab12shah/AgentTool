@@ -214,11 +214,14 @@ class PerformanceDialog(QDialog):
         self.disk_label = QLabel("")
         self.total_label = QLabel("")
         self.cleanup_label = QLabel("")
+        self.proxy_label = QLabel("")
+        self.proxy_label.setWordWrap(True)
         top.addRow("Rebuildable cache limit", self.cache_limit)
         top.addRow("Location", self.cache_loc)
         top.addRow("Current size", self.total_label)
         top.addRow("Disk space free", self.disk_label)
         top.addRow("Last cleanup", self.cleanup_label)
+        top.addRow("Proxy media", self.proxy_label)
         lay.addLayout(top)
         self.table = QTableWidget(len(CACHE_CATEGORIES), 4)
         self.table.setHorizontalHeaderLabels(["Category", "Entries", "Size", "Limit"])
@@ -254,9 +257,21 @@ class PerformanceDialog(QDialog):
         self.total_label.setText(_human(st.get("total_bytes", 0)) + (f" of {_human(st['total_limit_bytes'])}" if st.get("total_limit_bytes") else ""))
         self.disk_label.setText(_human(st.get("disk_free_bytes")) if st.get("disk_free_bytes") is not None else _human((self.svc.monitor.latest() or self.svc.monitor.sample()).disk_free_bytes))
         self.cleanup_label.setText(st.get("last_cleanup") or "never")
+        self.proxy_label.setText(self._proxy_text())
         for b in (self.btn_tmp, self.btn_cache):
             b.setEnabled(bool(avail))
         self.btn_proxies.setEnabled(self._has_project and bool(self.ws.render.proxies.records()))
+
+    def _proxy_text(self) -> str:
+        if not self._has_project:
+            return "Open a project to see its proxies."
+        try:
+            st = self.ws.render.proxies.status()
+            summ = st["summary"]
+            return (f"Policy {st['policy']}, profile {st['profile']} ({st['resolution']}): {summ['ready']} ready, {summ['queued']} queued, {summ['failed']} failed — "
+                    f"{_human(st['total_bytes'])} on disk.")
+        except Exception:  # noqa: BLE001 - a proxy status problem must not break the dialog
+            return "Proxy status is unavailable."
 
     def _clean_temp(self) -> None:
         r = self.svc.clear_rebuildable_cache(["temporary"]) or {}

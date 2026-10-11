@@ -86,10 +86,12 @@ class PerformanceService:
         return resolve(self.settings(), cpu_count=os.cpu_count() or 1, ram_bytes=s.system_total_bytes, disk_free_bytes=s.disk_free_bytes)
 
     def update_global(self, new: PerformanceSettings) -> None:
+        before = self.settings().render_backend
         cfg = self._settings()
         cfg.performance = new.sanitized().to_dict()
         self._save_settings(cfg)
         self.apply()
+        self._sync_render_backend(before)
         self._bus.publish(PERFORMANCE_UPDATED, kind="settings")
 
     def set_project_overrides(self, overrides: dict[str, Any]) -> None:
@@ -97,9 +99,24 @@ class PerformanceService:
         if p is None:
             return
         clean = {k: v for k, v in (overrides or {}).items() if k in PerformanceSettings.from_dict({}).to_dict()}
+        before = self.settings().render_backend
         self._execute(SetPerformanceOverridesCommand(p, clean))
         self.apply()
+        self._sync_render_backend(before)
         self._bus.publish(PERFORMANCE_UPDATED, kind="settings")
+
+    def _sync_render_backend(self, before: str) -> None:
+        """When the user changes the render backend here, the open project's export setting follows (an undoable edit shown on the Export page). Opening a project never overrides its export settings."""
+        p = self._projects.current
+        now = self.settings().render_backend
+        if p is None or now == before or p.render_settings.hardware_acceleration == now:
+            return
+        from dataclasses import replace  # noqa: PLC0415
+
+        from app.rendering.commands import SetRenderSettingsCommand  # noqa: PLC0415
+
+        self._execute(SetRenderSettingsCommand(p, replace(p.render_settings, hardware_acceleration=now), f"Render backend: {now}"))
+        log_event(_log, "perf.render_backend_changed", backend=now)
 
     def apply(self) -> ResolvedLimits:
         """Push the effective settings into the profiler, the scheduler and the cache. Failures are logged, never raised."""

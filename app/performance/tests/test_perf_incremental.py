@@ -444,3 +444,15 @@ def test_tracker_close_unsubscribes(env):
     assert env.tr.revision == r
     assert stable_key("x", 1)  # keep the import honest
     assert DependencyGraph is not None and AddClipCommand is not None and Clip is not None and new_clip_id is not None
+
+
+def test_a_proxy_record_never_invalidates_the_originals_dependants():
+    """Found by the Phase 9 acceptance workflow: making a proxy deleted the asset's thumbnail because the tracker treated the proxy record as a change to the original."""
+    from types import SimpleNamespace
+
+    from app.performance.change_tracker import _h_proxy
+    from app.performance.dependencies import asset_dep, settings_dep
+
+    eff = _h_proxy(SimpleNamespace(), SimpleNamespace(asset_id="media_00006"))
+    assert asset_dep("media_00006") not in eff.deps and settings_dep("proxies") in eff.deps and "proxy:media_00006" in eff.deps
+    assert not eff.all_scenes and not eff.direct

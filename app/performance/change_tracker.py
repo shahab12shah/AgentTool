@@ -612,9 +612,8 @@ def _h_render_settings(t: ProjectChangeTracker, c: Any) -> _Effect:  # resolutio
 
 
 def _h_proxy(t: ProjectChangeTracker, c: Any) -> _Effect:
-    e = t._asset_effect(c.asset_id, None, (D_RENDER,))
-    e.deps.add(settings_dep("proxies"))
-    return e
+    # a proxy record changing never changes the ORIGINAL media: the asset's own dependants (thumbnails, probe results, waveforms) stay valid. Only render-side state follows.
+    return _Effect(domains={D_RENDER}, deps={settings_dep("proxies"), f"proxy:{c.asset_id}"})
 
 
 def _h_qc_settings(t: ProjectChangeTracker, c: Any) -> _Effect:

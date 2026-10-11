@@ -52,8 +52,11 @@ class SyntheticProject:
         return {"scenes": self.spec.scenes, "clips": self.clips, "assets": self.assets, "words": self.words, "duration_s": round(self.duration, 1), "tracks": len(self.project.timeline.tracks)}
 
 
-def build_project(root: Path, spec: SyntheticSpec | int = 100, *, real_files: bool = False, name: str = "Synthetic") -> SyntheticProject:
-    """Create the project in memory with its folder structure under ``root`` (not saved; call ``ProjectManager.save``/``Project.to_document`` as needed)."""
+def build_project(root: Path, spec: SyntheticSpec | int = 100, *, real_files: bool = False, name: str = "Synthetic", media_pool: dict[str, Path] | None = None) -> SyntheticProject:
+    """Create the project in memory with its folder structure under ``root`` (not saved; call ``ProjectManager.save``/``Project.to_document`` as needed).
+
+    ``media_pool`` maps "image" / "video" / "audio" to a small REAL file; every asset of that kind then gets its own copy of it (so thumbnails, probing and proxies work for
+    real) while the declared resolution / duration stay those of the synthetic library (e.g. 4K) — the declared metadata, not the bytes, is what the project model sees."""
     spec = SyntheticSpec(scenes=spec) if isinstance(spec, int) else spec
     rng = random.Random(spec.seed)
     p = Project.new(name, ProjectSettings(1920, 1080, 30, "16:9"))
@@ -65,12 +68,20 @@ def build_project(root: Path, spec: SyntheticSpec | int = 100, *, real_files: bo
         aid = p.assets.new_id()
         folder = {"audio": "audio", "video": "video", "image": "images"}[kind]
         rel = f"media/{folder}/{aid}.{'wav' if kind == 'audio' else 'mp4' if kind == 'video' else 'png'}"
-        if real_files:
+        size = 64
+        if media_pool and kind in media_pool:
+            import shutil
+
+            path = p.root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(media_pool[kind], path)
+            size = path.stat().st_size
+        elif real_files:
             path = p.root / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"\0" * 64)
         a = Asset(aid, AssetType(kind), SourceType.USER_MEDIA, rel, f"{kind}_{aid}", dur, w, h, 30.0 if kind == "video" else None, None, False, None,
-                  48000 if kind == "audio" else None, 2 if kind == "audio" else None, 64, f"hash_{aid}")
+                  48000 if kind == "audio" else None, 2 if kind == "audio" else None, size, f"hash_{aid}")
         p.assets.add(a)
         return a
 
