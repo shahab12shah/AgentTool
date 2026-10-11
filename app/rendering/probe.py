@@ -7,16 +7,22 @@ Gives the renderer the facts it must not guess: the *display* size (after rotati
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.core.constants import AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from app.core.exceptions import FFmpegUnavailableError, MediaProbeError, UnsupportedMediaError
+from app.performance.dependencies import stable_key
+from app.performance.memory_monitor import BoundedLRU
+from app.performance.profiler import profiler
 from app.rendering.ffmpeg_service import FFmpegService
 
+PROBE_VERSION = 1  # bump when ProbeInfo changes meaning: persisted results of another version are probed again
+MEMORY_ENTRIES = 4096
 INTERNAL_VIDEO = {".ts"}  # the renderer's own intermediate sections (not an importable media type)
 ALPHA_PREFIXES = ("rgba", "bgra", "argb", "abgr", "yuva", "gbrap", "ya8", "ya16", "gray16a")
 
@@ -152,10 +158,43 @@ def _float(v: Any) -> float | None:
 
 
 class MediaProbeService:
+    """FFprobe results, remembered in memory (bounded) and, when a cache manager is attached, across restarts (category ``analysis``).
+
+    A persisted result is keyed by the file's path, size and modification time, so a changed file is probed again by itself. Failures are never stored.
+    """
+
     def __init__(self, ffmpeg: FFmpegService) -> None:
         self.ff = ffmpeg
-        self._cache: dict[tuple[str, int, int], ProbeInfo] = {}
+        self._cache: BoundedLRU[tuple[str, int, int], ProbeInfo] = BoundedLRU(MEMORY_ENTRIES)
         self._lock = threading.Lock()
+        self._cache_getter: Callable[[], Any] | None = None
+        self.persisted_hits = 0
+
+    def attach_cache(self, getter: Callable[[], Any]) -> None:
+        """``getter()`` returns the open project's ``MediaCacheManager`` (or None): probe results are then also kept on disk."""
+        self._cache_getter = getter
+
+    def _persistent(self) -> Any:
+        try:
+            return self._cache_getter() if self._cache_getter else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _persist_key(path: Path, size: int, mtime_ns: int) -> str:
+        return stable_key("probe", Path(os.path.abspath(path)), size, mtime_ns)
+
+    @staticmethod
+    def _from_stored(path: Path, d: Any) -> ProbeInfo | None:
+        """A stored dict back into a ProbeInfo; anything that does not look right is ignored (the file is probed again)."""
+        try:
+            if not isinstance(d, dict) or str(d.get("path")) != str(path):
+                return None
+            names = {f.name for f in fields(ProbeInfo)}
+            info = ProbeInfo(**{k: v for k, v in d.items() if k in names})
+            return info if info.kind in ("video", "image", "audio") else None
+        except (TypeError, ValueError):
+            return None
 
     def probe(self, path: Path, use_cache: bool = True) -> ProbeInfo:
         path = Path(path)
@@ -165,13 +204,27 @@ class MediaProbeService:
         except OSError as exc:
             raise MediaProbeError(f"“{path.name}” cannot be read: {exc.strerror or exc}") from exc
         key = (str(path), st.st_size, int(st.st_mtime_ns))
+        store = self._persistent() if use_cache else None
+        pkey = self._persist_key(path, st.st_size, int(st.st_mtime_ns)) if store is not None else ""
         if use_cache:
-            with self._lock:
-                if key in self._cache:
-                    return self._cache[key]
+            hit = self._cache.get(key)
+            if hit is not None:
+                profiler.cache_hit("probe")
+                return hit
+            if store is not None:
+                entry = store.get(pkey, category="analysis", version=PROBE_VERSION)
+                info = self._from_stored(path, entry.inline) if entry is not None else None
+                if info is not None:
+                    self._cache.put(key, info)
+                    self.persisted_hits += 1
+                    return info
+                if entry is not None:  # stored, but unusable: drop it
+                    store.invalidate(pkey)
+            profiler.cache_miss("probe")
         cmd = [self.ff.ffprobe(), "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)]
         try:
-            r = self.ff.run(cmd, timeout=60)
+            with profiler.timer("probe.ffprobe"):
+                r = self.ff.run(cmd, timeout=60)
         except subprocess.TimeoutExpired as exc:
             raise MediaProbeError(f"Reading “{path.name}” timed out.", details=str(exc)) from exc
         except OSError as exc:
@@ -184,8 +237,10 @@ class MediaProbeService:
             raise MediaProbeError(f"“{path.name}” returned unreadable metadata.", details=str(exc)) from exc
         info = parse_probe(path, data)
         info.size_bytes = info.size_bytes or st.st_size
-        with self._lock:
-            self._cache[key] = info
+        if use_cache:
+            self._cache.put(key, info)
+            if store is not None:
+                store.put(pkey, info.to_dict(), category="analysis", data_type="probe", version=PROBE_VERSION)
         return info
 
     def try_probe(self, path: Path) -> tuple[ProbeInfo | None, str]:

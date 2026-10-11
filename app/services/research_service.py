@@ -22,6 +22,7 @@ from app.core.exceptions import AcquisitionError, AppError, JobCancelled, Provid
 from app.jobs.job import Job
 from app.jobs.job_manager import JobManager
 from app.logging.logger import get_logger, log_event
+from app.performance.analysis_cache import AnalysisCache
 from app.media.asset import SourceType as S
 from app.media.importer import LINK_COPY, MediaImporter, PreparedMedia
 from app.project.phase3_commands import ApplyResearchCommand, SceneDecisionCommand
@@ -55,6 +56,7 @@ from app.research.providers.youtube import YouTubeProvider
 from app.research.queries import STRATEGIES, QueryGenerator
 from app.research.ranking import RankingHistory, UsedVisual, title_terms
 from app.research.dedupe import identity_keys
+from app.research.evaluation import MetadataEvaluator
 from app.services.media_service import MediaService
 from app.visual.research import SceneResearchResult, VisualResearchService
 from app.visual.preferences import SourceKind
@@ -81,6 +83,7 @@ class ResearchService(VisualResearchService):
         self.registry.register(ScreenshotProvider(lambda: s().chromium_path, http=http))
         self.registry.register(AIImageProvider(lambda: s().ai_image_base_url, lambda: s().ai_image_model, lambda: s().ai_image_key_env, http=http))
         self.engine = ResearchEngine(self.registry, http=http)
+        self.analysis: AnalysisCache | None = None  # input-fingerprint skip for re-evaluating unchanged candidates (installed by the Workspace)
 
     # ------------------------------------------------------------------ basics
     def _project(self) -> Project:
@@ -281,8 +284,15 @@ class ResearchService(VisualResearchService):
                 out.append({"kind": k.value, "source_type": st.value, "providers": usable})
         return out
 
-    def rescore(self, scene_id: str) -> Job:
-        """Re-evaluate and re-rank the stored candidates (after changing the minimum score, weights or preferences)."""
+    def _evaluation_id(self) -> str | None:
+        """Identity of the evaluation + ranking that ``evaluate_and_rank`` will use, or ``None`` when it is not a deterministic function of its inputs (an AI evaluator, a custom ranker)."""
+        ev = self.engine.evaluation
+        if self.engine.ranker is not None or not (ev is None or isinstance(getattr(ev, "evaluator", None), MetadataEvaluator)):
+            return None
+        return "metadata-v1"
+
+    def rescore(self, scene_id: str, force: bool = False) -> Job:
+        """Re-evaluate and re-rank the stored candidates (after changing the minimum score, weights or preferences). With unchanged inputs the stored evaluation is reused; ``force`` re-computes."""
         project = self._project()
         brief = self.brief(scene_id)
         cands = [deepcopy(c) for c in project.visual_candidates.values() if c.scene_id == scene_id]
@@ -290,10 +300,17 @@ class ResearchService(VisualResearchService):
             raise ResearchError("There are no candidates to evaluate yet.")
         prefs, rs, history = deepcopy(project.visual_preferences), deepcopy(project.research_settings), self.history_for(project, scene_id)
         prev = project.research_status.get(scene_id)
+        analysis, evaluation_id = self.analysis, self._evaluation_id()
 
         def work(ctx):
             ctx.report(30, "Evaluating candidates")
-            return self.engine.evaluate_and_rank(brief, cands, prefs, rs, history)
+            compute = lambda: self.engine.evaluate_and_rank(brief, cands, prefs, rs, history)  # noqa: E731
+            if analysis is None or evaluation_id is None:
+                return compute()
+            out, hit = analysis.run("research.rescore", (scene_id, brief, [c.to_dict() for c in cands], prefs, rs, history, evaluation_id), compute, cls=ResearchOutcome, force=force)
+            if hit:
+                log_event(_log, "analysis.skipped", kind="research.rescore", scene_id=scene_id)
+            return out
 
         def done(job: Job) -> None:
             if self._projects.current is not project:

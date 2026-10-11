@@ -39,6 +39,7 @@ from app.services.research_service import ResearchService
 from app.services.editing_service import EditingService
 from app.services.presentation_service import PresentationService
 from app.qc.qc_service import QCService
+from app.performance.analysis_cache import AnalysisCache
 from app.performance.change_tracker import ProjectChangeTracker
 from app.services.reference_service import ReferenceService
 from app.services.render_service import RenderService
@@ -89,6 +90,7 @@ class Workspace:
         self.qc.tracker = self.changes
         self.performance = PerformanceService(self.projects, self.jobs, self.bus, self.commands.execute, lambda: self.settings, self.settings_store.save,
                                               lambda: self.render.engine.hardware, proxy_in_use=lambda p: any(r.proxy_path == str(p) for r in self.render.proxies.records().values() if r.proxy_status in ("READY", "QUEUED")))
+        self.research.analysis = AnalysisCache(lambda: self.performance.cache)  # unchanged analysis is not computed again
         self.render.qc_gate = self.qc.export_gate  # the export is blocked only by a QC run that still matches the project
         self._install_fix_engine()
         self.bus.subscribe(Topics.RENDER_HISTORY_CHANGED, self._on_render_history)

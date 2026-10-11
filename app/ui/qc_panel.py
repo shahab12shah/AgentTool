@@ -635,6 +635,15 @@ class QCPanel(QWidget):
         if stale:
             notes.append("The project changed since this QC run: run QC again to refresh the results." if p.qc_runs[-1].get("content_hash")
                          else "This QC run did not cover the whole project (a scene or category run, or a canceled run): run QC again for a complete result.")
+        if stale and p.qc_runs[-1].get("content_hash"):
+            try:  # which scenes the edits since the last run touched (from the change log: no hashing)
+                st = self.ws.qc.qc_staleness()
+                labels = {sc.id: sc.label for sc in p.scenes}
+                if st["stale"] and 0 < len(st["scene_ids"]) < len(p.scenes):
+                    names = [labels.get(i, i) for i in st["scene_ids"]]
+                    notes.append("Scenes to re-check: " + ", ".join(names[:12]) + (f" and {len(names) - 12} more" if len(names) > 12 else "") + ". Run QC re-analyses only what changed.")
+            except Exception:  # noqa: BLE001  (a hint must never break the panel)
+                pass
         if failed:
             notes.append("These checks did not complete: " + ", ".join(CHECKER_LABELS.get(f, f) for f in failed) + ". Their scores are shown as — (not 100).")
         self.stale_label.setText("\n".join(notes))

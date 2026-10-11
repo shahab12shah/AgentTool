@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -30,6 +28,11 @@ class TransportControls(QWidget):
         super().__init__(parent)
         self._player = player
         self._seeking = False
+        self._drag_to: float | None = None
+        self._seek_timer = QTimer(self)  # while the handle is dragged only the newest position is applied (every 30 ms): older seeks are superseded, not queued
+        self._seek_timer.setSingleShot(True)
+        self._seek_timer.setInterval(30)
+        self._seek_timer.timeout.connect(self._apply_drag)
         self.play_btn = QPushButton("Play")
         self.play_btn.setObjectName("play")
         self.stop_btn = QPushButton("Stop")
@@ -52,7 +55,7 @@ class TransportControls(QWidget):
         self.stop_btn.clicked.connect(player.stop)
         self.seek.sliderPressed.connect(lambda: setattr(self, "_seeking", True))
         self.seek.sliderReleased.connect(self._seek_released)
-        self.seek.sliderMoved.connect(lambda v: player.seek(v / 1000.0))
+        self.seek.sliderMoved.connect(self._on_drag)
         self.volume.valueChanged.connect(lambda v: player.set_volume(v / 100.0))
         player.position_changed.connect(self._on_position)
         player.duration_changed.connect(self._on_duration)
@@ -66,8 +69,21 @@ class TransportControls(QWidget):
     def _toggle(self) -> None:
         self._player.pause() if self._player.is_playing else self._player.play()
 
+    def _on_drag(self, value: int) -> None:
+        self._drag_to = value / 1000.0
+        if not self._seek_timer.isActive():
+            self._apply_drag()  # the first move is applied at once; the moves that follow within the interval are merged into the last one
+            self._seek_timer.start()
+
+    def _apply_drag(self) -> None:
+        if self._drag_to is not None:
+            pos, self._drag_to = self._drag_to, None
+            self._player.seek(pos)
+
     def _seek_released(self) -> None:
         self._seeking = False
+        self._seek_timer.stop()
+        self._drag_to = None
         self._player.seek(self.seek.value() / 1000.0)
 
     def _on_position(self, seconds: float) -> None:

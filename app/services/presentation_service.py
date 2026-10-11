@@ -32,8 +32,9 @@ from app.editing.effective import effective_audio_settings, effective_caption_se
 from app.editing.models import Creator, DecisionType, TextGraphic, now_iso
 from app.editing.strategy import RuleBasedProvider
 from app.editing.validator import ValidationIssue
-from app.jobs.job import Job
+from app.jobs.job import Job, Priority
 from app.jobs.job_manager import JobManager
+from app.performance.dependencies import asset_dep
 from app.logging.logger import get_logger, log_event
 from app.media.asset import AssetType
 from app.presentation import animation as anim
@@ -283,6 +284,10 @@ class PresentationService:
 
         return self._jobs.submit("audio_analysis", work, title="Analysing the voice-over", on_complete=done, on_error=failed)
 
+    def attach_performance(self, getter) -> None:
+        """Register waveform files with the performance service's cache manager (optional)."""
+        self.audio.waveforms.cache_getter = lambda: getattr(getter(), "cache", None) if getter() is not None else None
+
     def waveform(self, asset_id: str, request: bool = True):
         """A cached waveform, or None. With ``request`` a background job is started to create a missing one (never call that from a paint event)."""
         p = self._projects.current
@@ -290,7 +295,7 @@ class PresentationService:
         if a is None or a.type is not AssetType.AUDIO:
             return None
         key = a.content_hash or a.id
-        wf = self.audio.waveforms.cached(key)
+        wf = self.audio.waveforms.cached(key, p.asset_path(a))
         if wf is None and request:
             self._request_waveform(p, a, key)
         return wf
@@ -306,7 +311,7 @@ class PresentationService:
         path = p.asset_path(a)
 
         def work(ctx):
-            return self.audio.waveforms.compute(path, key, lambda pct, msg: ctx.report(pct, msg))
+            return self.audio.waveforms.compute(path, key, lambda pct, msg: ctx.report(pct, msg), ctx.is_cancelled, asset_dep(a.id), a.duration)
 
         def done(job: Job) -> None:
             pending.discard(key)
@@ -316,8 +321,12 @@ class PresentationService:
             pending.discard(key)
             failed_keys.add(key)
 
+        def cancelled(job: Job) -> None:
+            pending.discard(key)  # cancelled (project closed / asked away): not a broken file, so it may be requested again
+
         try:
-            self._jobs.submit("waveform", work, title=f"Waveform: {a.name}", on_complete=done, on_error=failed, on_cancel=failed)
+            self._jobs.submit("waveform", work, title=f"Waveform: {a.name}", on_complete=done, on_error=failed, on_cancel=cancelled, priority=Priority.MEDIUM,
+                              dedupe_key=f"waveform:{key}", owner=p.project_id)
         except Exception:
             pending.discard(key)
 

@@ -167,6 +167,7 @@ class ProjectChangeTracker:
         self._warned: set[str] = set()
         self._unsubs: list[Callable[[], None]] = []
         self.events_seen = 0
+        self._validated_event = -1  # the event during which the scene index was last checked against the live scenes (checked once per event, not per lookup)
         self.invalidated = 0  # cache entries dropped through dependency invalidation
         if bus is not None:
             self._unsubs = [bus.subscribe(Topics.PROJECT_CHANGED, self._on_changed), bus.subscribe(Topics.PROJECT_OPENED, self._on_reset), bus.subscribe(Topics.PROJECT_CLOSED, self._on_reset)]
@@ -237,6 +238,7 @@ class ProjectChangeTracker:
     # ------------------------------------------------------------------ neighbours
     def neighbours(self, scene_id: str, hops: int = 1) -> list[str]:
         with self._lock:
+            self._validated_event = -1
             idx = self._scene_index()
             return idx.neighbours(scene_id, hops) if idx else []
 
@@ -250,9 +252,12 @@ class ProjectChangeTracker:
         if p is None:
             self._index = None
             return None
+        if self._index is not None and self._validated_event == self.events_seen:
+            return self._index
         scenes = p.scenes
         if self._index is None or not self._index.fresh_for(scenes):
             self._index = _SceneIndex(scenes)
+        self._validated_event = self.events_seen
         return self._index
 
     # ------------------------------------------------------------------ events
@@ -272,7 +277,9 @@ class ProjectChangeTracker:
             with self._lock:
                 if scope in ("scenes",) or self._index is None:
                     self._index = None
+                self._validated_event = -1
                 eff = self._effect_of(cmd, scope)
+                self._validated_event = -1
         except Exception:  # noqa: BLE001  (a mapping bug must widen the change, never lose it)
             _log.warning("change mapping failed for %s", type(cmd).__name__, exc_info=True)
             eff = self._broad(scope, unknown=True)
@@ -284,6 +291,7 @@ class ProjectChangeTracker:
         if content:
             eff.content = set(eff.direct)
         with self._lock:
+            self._validated_event = -1
             self._add_neighbours(eff)
         self.record(eff)
 

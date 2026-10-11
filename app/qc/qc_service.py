@@ -306,11 +306,11 @@ class QCService:
         log (no hashing, safe to call on every edit); ``exact=True`` (or no usable log) compares content hashes, which is also what the export gate uses and what stays authoritative."""
         p = self._project()
         if not p.qc_runs or p.qc_scores is None:
-            return {"stale": True, "scene_ids": [], "domains": [], "reason": "QC has not run yet", "source": "none"}
+            return {"stale": True, "scene_ids": [], "domains": [], "reason": "QC has not run yet", "source": "none", "unknown_change": False}
         rec = p.qc_runs[-1]
         base = self._baseline(p)
         if not rec.get("content_hash"):
-            return {"stale": True, "scene_ids": [], "domains": [], "reason": "The last QC run did not cover the whole project (scene / category run or canceled).", "source": "run"}
+            return {"stale": True, "scene_ids": [], "domains": [], "reason": "The last QC run did not cover the whole project (scene / category run or canceled).", "source": "run", "unknown_change": False}
         t = self.tracker
         if base is not None and t is not None and not exact and base.get("epoch") == t.epoch and base.get("project_id") == p.project_id:
             cs = t.peek(since=int(base.get("revision", 0)))
@@ -323,10 +323,10 @@ class QCService:
             return {"stale": stale, "scene_ids": scenes, "domains": domains, "reason": "The project changed since the last QC run." if stale else "", "source": "tracker", "unknown_change": cs.unknown}
         stale = rec["content_hash"] != self.current_content_hash(p)
         if not stale:
-            return {"stale": False, "scene_ids": [], "domains": [], "reason": "", "source": "hash"}
+            return {"stale": False, "scene_ids": [], "domains": [], "reason": "", "source": "hash", "unknown_change": False}
         domains, scenes, _direct, all_scenes, _src, _unk = self._changes_since(p, base, QCContext.build(p, detach=False)) if base is not None else ([], set(), set(), True, "hash", False)
         order = [s.id for s in sorted(p.scenes, key=lambda s: s.start)]
-        return {"stale": True, "scene_ids": order if all_scenes else [s for s in order if s in scenes], "domains": sorted(set(domains)), "reason": "The project changed since the last QC run.", "source": "hash"}
+        return {"stale": True, "scene_ids": order if all_scenes else [s for s in order if s in scenes], "domains": sorted(set(domains)), "reason": "The project changed since the last QC run.", "source": "hash", "unknown_change": False}
 
     @staticmethod
     def _baseline(p: Project) -> dict[str, Any] | None:
@@ -348,6 +348,8 @@ class QCService:
             domains = [d for d in cs.domains if d in QC_DOMAINS]
             # a hash that moved without the tracker having seen why means the log is incomplete: fall through to the exact comparison
             moved = [d for d in HASH_DOMAINS if live.domain_hash(d) != base["domains"].get(d)]
+            if live.basis_hash() != base.get("basis"):
+                moved.append(D_EDITING)
             if set(moved) <= set(cs.domains) or cs.all_scenes:
                 return domains, set(cs.scene_ids), set(cs.direct_scene_ids), cs.all_scenes, "tracker", cs.unknown
         moved = [d for d in HASH_DOMAINS if live.domain_hash(d) != base["domains"].get(d)]

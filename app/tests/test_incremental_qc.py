@@ -321,3 +321,24 @@ def test_qc_settings_that_change_the_analysis_make_results_stale_but_presentatio
 
 def test_category_table_is_untouched_by_the_baseline_key():
     assert "_incremental" not in CHECKER_CATEGORIES and copy.deepcopy(CHECKER_CATEGORIES)
+
+
+def test_the_workspace_feeds_the_tracker_and_it_reaches_the_cache(project_ws):
+    from app.performance.dependencies import asset_dep, scene_dep
+
+    ws = project_ws
+    assert ws.qc.tracker is ws.changes and ws.research.analysis is not None
+    cache = ws.performance.cache
+    assert cache is not None
+    cache.put("thumb:a1", {"x": 1}, category="analysis", deps={asset_dep("a1"): "v1"})
+    cache.put("thumb:a2", {"x": 2}, category="analysis", deps={asset_dep("a2"): "v1"})
+    cache.put("scene:s1", {"x": 3}, category="analysis", deps={scene_dep("s1"): "v1"})
+    r0 = ws.changes.revision
+    ws.changes.mark(deps=[asset_dep("a1")])  # e.g. the file behind asset a1 changed on disk
+    assert ws.changes.revision == r0 + 1
+    assert cache.get("thumb:a1") is None and cache.get("thumb:a2") is not None and cache.get("scene:s1") is not None
+    track = ws.timeline.add_track()
+    assert ws.changes.peek(since=r0 + 1).domains >= {"timeline"} and track.id
+    old_epoch = ws.changes.epoch
+    ws.close_project()
+    assert ws.changes.epoch > old_epoch and ws.changes.peek().empty

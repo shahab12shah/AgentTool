@@ -61,6 +61,7 @@ class RenderService:
         self._checkpoint, self._autosave = checkpoint, autosave
         self.engine = RenderEngine(lambda: self._settings().ffmpeg_path, lambda: self._settings().ffprobe_path)
         self.proxies = ProxyManager(self._project, jobs, bus, apply_command, self.engine.ffmpeg, self.engine.probe)
+        self.proxies.in_use = self._proxy_in_use
         self.relink = MediaRelinkService(self._project, execute_command, self.engine.probe)  # relinking is a normal, undoable edit
         self.preview = PreviewEngine(self.engine, lambda: self._projects.current.root if self._projects.current else None)
         self.queue = RenderQueue(self.engine, self._on_update, self._on_finished, max_parallel=1)
@@ -68,6 +69,16 @@ class RenderService:
         self.qc_gate: Callable[[], object] | None = None  # installed by the Workspace: returns app.qc.qc_service.GateResult (blocks only when a *current* QC run says so)
         self.chunk_seconds = 30.0  # target length of one cached video section (scene aligned)
         self.chunk_max_seconds: float | None = None
+
+    def _proxy_in_use(self, path: Path) -> bool:
+        """A render or preview that has not finished may be reading this proxy (its snapshot lists it): it must not be removed under it."""
+        import os  # noqa: PLC0415
+
+        p = os.path.normcase(os.path.abspath(path))
+        for j in self.queue.jobs():
+            if not j.status.is_terminal and any(r.path and os.path.normcase(os.path.abspath(r.path)) == p for r in j.spec.snapshot.proxies.values()):
+                return True
+        return False
 
     # ------------------------------------------------------------------ project / settings
     def _project(self) -> Project:

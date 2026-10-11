@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+import os
+
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from app.editing.compose import FrameState, Layer
+from app.performance.profiler import profiler
 from app.preview.frames import FrameProvider
 from app.ui.context import UiContext
 
@@ -19,18 +22,62 @@ class TimelinePreview(QWidget):
         self.ctx = ctx
         self.time = 0.0
         self.frame: FrameState | None = None
-        self._pix: dict[str, QPixmap] = {}
-        self.frames = FrameProvider(lambda: ctx.ws.project, lambda: ctx.ws.settings.ffmpeg_path,
-                                    lambda a: ctx.ws.render.proxies.proxy_path_for(a) if ctx.ws.settings.use_proxies else None)
+        ws = ctx.ws
+        perf = lambda: getattr(ws, "performance", None)  # noqa: E731 - optional plumbing: without it the preview behaves as before
+        self.frames = FrameProvider(lambda: ws.project, lambda: ws.settings.ffmpeg_path,
+                                    lambda a: ws.render.proxies.proxy_path_for(a) if ws.settings.use_proxies else None,
+                                    quality_getter=lambda: perf().settings().preview_quality if perf() else "balanced", cache_getter=lambda: getattr(perf(), "cache", None),
+                                    limits_getter=lambda: perf().limits() if perf() else None, pressure_ok=self._pressure_ok, jobs=ws.jobs)
+        self._prefetch_timer = QTimer(self)
+        self._prefetch_timer.setSingleShot(True)
+        self._prefetch_timer.setInterval(200)
+        self._prefetch_timer.timeout.connect(self._prefetch)
         self.setMinimumSize(480, 270)
         self.setObjectName("timelinePreview")
+        for topic in ("project.closed", "project.opened"):
+            ctx.bridge.on(topic, lambda _p: self.release())
+
+    def _pressure_ok(self) -> bool:
+        mon = getattr(getattr(self.ctx.ws, "performance", None), "monitor", None)
+        try:
+            s = mon.latest() if mon is not None else None
+            return True if s is None else mon.pressure(s).get("overall", "normal") == "normal"
+        except Exception:  # noqa: BLE001
+            return True
+
+    def release(self) -> None:
+        """The project changed: forget queued frames and decoded pixmaps."""
+        self._prefetch_timer.stop()
+        self.frames.release()
+        self.frame = None
 
     def show_time(self, t: float) -> FrameState | None:
         self.time = max(0.0, t)
         project = self.ctx.ws.project
-        self.frame = self.ctx.ws.editing.composer().frame_at(self.time) if project is not None else None
+        self.frames.begin_seek()  # a newer seek supersedes extractions still queued for older positions
+        with profiler.timer("preview.seek"):
+            self.frame = self.ctx.ws.editing.composer().frame_at(self.time) if project is not None else None
         self.update()
+        self._prefetch_timer.start()
         return self.frame
+
+    def _frame_ready(self, _path) -> None:
+        try:
+            self.update()
+        except RuntimeError:  # the widget was destroyed while the frame was being made
+            pass
+
+    def _prefetch(self) -> None:
+        """A moment after the playhead stopped: prepare the frames around it at idle priority (the queue holds them while the machine is busy)."""
+        project = self.ctx.ws.project
+        if project is None or self.frame is None:
+            return
+        for layer in self.frame.layers:
+            if layer.kind == "media" and layer.asset_id:
+                asset = project.assets.get(layer.asset_id)
+                if asset is not None:
+                    self.frames.prefetch_around(asset, layer.src_time)
+                break
 
     # ------------------------------------------------------------------ painting
     def _canvas_rect(self) -> QRectF:
@@ -48,15 +95,18 @@ class TimelinePreview(QWidget):
         asset = project.assets.get(layer.asset_id) if project and layer.asset_id else None
         if asset is None:
             return None
-        path = self.frames.frame_path(asset, layer.src_time)
+        path = self.frames.request(asset, layer.src_time, self._frame_ready)
         if path is None:
             return None
-        key = str(path)
-        if key not in self._pix:
-            if len(self._pix) > 60:
-                self._pix.clear()
-            self._pix[key] = QPixmap(key)
-        pm = self._pix[key]
+        tier = self.frames.memory_tier()
+        try:
+            key = (str(path), os.stat(path).st_mtime_ns)
+        except OSError:
+            return None
+        pm = tier.get(key)
+        if pm is None:
+            pm = QPixmap(str(path))
+            tier.put(key, pm)
         return pm if not pm.isNull() else None
 
     def paintEvent(self, _e) -> None:  # noqa: N802
@@ -87,6 +137,17 @@ class TimelinePreview(QWidget):
         p.restore()
         p.setPen(QPen(QColor("#2b3140"), 1))
         p.drawRect(r)
+        tag = self.frames.reduced_quality()
+        self.setToolTip("Preview only: the export always uses the original media at the export quality." if tag else "")
+        if tag:
+            f = QFont(self.font())
+            f.setPixelSize(11)
+            p.setFont(f)
+            w = p.fontMetrics().horizontalAdvance(tag) + 12
+            box = QRectF(r.left() + 6, r.top() + 6, w, 18)
+            p.fillRect(box, QColor(0, 0, 0, 170))
+            p.setPen(QColor("#f2c14e"))
+            p.drawText(box, Qt.AlignmentFlag.AlignCenter, tag)
 
     def _paint_media(self, p: QPainter, layer: Layer, r: QRectF, k: float) -> None:
         pm = self._pixmap(layer)
@@ -97,7 +158,7 @@ class TimelinePreview(QWidget):
         if pm is None:
             p.fillRect(r, QColor("#1b2030"))
             p.setPen(QColor("#8d95a3"))
-            p.drawText(r, Qt.AlignmentFlag.AlignCenter, "frame unavailable")
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter, "loading frame…" if self.frames.pending_count() else "frame unavailable")
             p.restore()
             return
         ratio = pm.width() / pm.height()

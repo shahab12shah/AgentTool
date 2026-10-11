@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 import numpy as np
 
@@ -43,6 +44,15 @@ class AudioBackend(ABC):
     @abstractmethod
     def decode_mono(self, path: Path, sample_rate: int = ANALYSIS_SR) -> np.ndarray:
         """Float32 mono samples in [-1, 1]."""
+
+    def stream_mono(self, path: Path, sample_rate: int = ANALYSIS_SR, chunk_seconds: float = 10.0, should_cancel: Callable[[], bool] | None = None) -> Iterator[np.ndarray]:
+        """Mono float32 samples in chunks, so a long file never has to be held in memory at once. The default slices ``decode_mono``; backends override it with a real stream."""
+        samples = self.decode_mono(path, sample_rate)
+        step = max(1, int(chunk_seconds * sample_rate))
+        for i in range(0, len(samples), step):
+            if should_cancel is not None and should_cancel():
+                return
+            yield samples[i:i + step]
 
     @abstractmethod
     def measure_loudness(self, path: Path) -> LoudnessResult: ...
@@ -83,6 +93,41 @@ class FFmpegAudioBackend(AudioBackend):
             msg = r.stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or ["unsupported or corrupt audio"]
             raise AudioError(f"{Path(path).name} cannot be decoded ({msg[0]}).")
         return np.frombuffer(r.stdout, dtype="<f4").copy()
+
+    def stream_mono(self, path: Path, sample_rate: int = ANALYSIS_SR, chunk_seconds: float = 10.0, should_cancel: Callable[[], bool] | None = None) -> Iterator[np.ndarray]:
+        if not Path(path).is_file():
+            raise AudioError(f"The audio file is missing: {Path(path).name}")
+        import tempfile
+
+        step = max(1, int(chunk_seconds * sample_rate)) * 4
+        flags = {"creationflags": 0x08000000} if sys.platform.startswith("win") else {}
+        with tempfile.TemporaryFile() as err:
+            p = subprocess.Popen([self._exe(), "-hide_banner", "-nostdin", "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "f32le", "-"],
+                                 stdout=subprocess.PIPE, stderr=err, stdin=subprocess.DEVNULL, **flags)
+            assert p.stdout is not None
+            carry = b""
+            total = 0
+            try:
+                while True:
+                    if should_cancel is not None and should_cancel():
+                        return
+                    block = p.stdout.read(step)
+                    if not block:
+                        break
+                    block = carry + block
+                    usable = len(block) - len(block) % 4
+                    carry = block[usable:]
+                    if usable:
+                        total += usable
+                        yield np.frombuffer(block[:usable], dtype="<f4").copy()
+            finally:
+                if p.poll() is None:
+                    p.kill()
+                p.wait()
+            if p.returncode != 0 or total == 0:
+                err.seek(0)
+                lines = err.read().decode("utf-8", "replace").strip().splitlines()[-1:] or ["unsupported or corrupt audio"]
+                raise AudioError(f"{Path(path).name} cannot be decoded ({lines[0]}).")
 
     def measure_loudness(self, path: Path) -> LoudnessResult:
         try:
