@@ -6,6 +6,7 @@ import json
 import shutil
 from pathlib import Path
 
+from app.performance.profiler import profiler
 from app.core.constants import (
     PROJECT_BACKUP_SUFFIX,
     PROJECT_FILE,
@@ -97,6 +98,7 @@ class ProjectManager:
         return Project.from_document(doc, root=root)
 
     # ----- save -----
+    @profiler.timed("project.save")
     def save(self, project: Project | None = None) -> Project:
         project = project or self.current
         if project is None:

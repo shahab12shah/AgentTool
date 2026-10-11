@@ -14,6 +14,7 @@ from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import QMenu, QToolTip, QWidget
 
+from app.performance.profiler import profiler
 from app.core.constants import MIN_CLIP_DURATION
 from app.core.timecode import format_timecode
 from app.media.asset import AssetType
@@ -190,6 +191,7 @@ class TimelineCanvas(QWidget):
             p.setBrush(col)
             p.drawPolygon([QPointF(r.left(), r.top()), QPointF(r.right(), r.top()), QPointF(r.center().x(), r.bottom())])
 
+    @profiler.timed("timeline.zoom")
     def set_zoom(self, pps: float) -> None:
         self.pps = max(MIN_PPS, min(MAX_PPS, pps))
         self._apply_size()
@@ -219,6 +221,7 @@ class TimelineCanvas(QWidget):
             self._qcolors[key] = col
         return col
 
+    @profiler.timed("timeline.paint")
     def paintEvent(self, event) -> None:  # noqa: N802
         c = palette(self.ctx.ws.settings.theme)
         p = QPainter(self)

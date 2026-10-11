@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
+from app.performance.profiler import profiler
 from app.ai.provider import AIProviderRegistry
 from app.core.commands import Command, CommandStack, CompositeCommand
 from app.core.config import Settings, SettingsStore
@@ -202,9 +203,10 @@ class Workspace:
 
     def open_project(self, path: Path, from_backup: bool = False) -> Project:
         old = self.projects.current
-        project = self.projects.open(path, from_backup=from_backup)
-        self._reset_session(old)
-        self._after_open()
+        with profiler.timer("project.open"):
+            project = self.projects.open(path, from_backup=from_backup)
+            self._reset_session(old)
+            self._after_open()
         return project
 
     def _after_open(self) -> None:
@@ -254,6 +256,7 @@ class Workspace:
 
         return self.jobs.submit("project.save_as", work, title=f"Saving project as {new_name}", on_complete=done, on_error=failed)
 
+    @profiler.timed("project.close")
     def close_project(self) -> None:
         """Close the current project. The caller is responsible for asking about unsaved changes."""
         old = self.projects.current

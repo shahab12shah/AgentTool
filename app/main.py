@@ -20,6 +20,7 @@ _drop_script_dir_from_path()
 from PySide6.QtCore import QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from app.performance.profiler import profiler
 from app.core.constants import APP_NAME, APP_VERSION  # noqa: E402
 from app.logging.logger import get_logger, log_event, setup_logging  # noqa: E402
 from app.services.workspace import Workspace  # noqa: E402
@@ -33,7 +34,13 @@ from app.ui.theme import stylesheet  # noqa: E402
 
 def create_window(paths: AppPaths | None = None) -> tuple[MainWindow, Workspace]:
     """Build the workspace and main window (used by ``main`` and by UI tests)."""
+    with profiler.timer("app.startup"):
+        return _create_window(paths)
+
+
+def _create_window(paths: AppPaths | None) -> tuple[MainWindow, Workspace]:
     ws = Workspace(paths)
+    ws.performance.start()  # applies the saved performance settings; light background sampling; hardware detection is NOT started here (it runs on request, in a background job)
     bridge = UiBridge(ws.bus)
     ws.jobs.set_dispatcher(bridge.dispatch)  # job callbacks run on the UI thread
     QApplication.instance().setStyleSheet(stylesheet(ws.settings.theme))  # type: ignore[union-attr]

@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pytest
 
-from app.core.exceptions import AppError
 from app.jobs.job import Priority
 from app.performance.change_tracker import scene_layout_dep
 from app.performance.synthetic import SyntheticSpec, build_project

@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
+from app.performance.profiler import profiler
 from app.core.commands import Command
 from app.core.events import EventBus, Topics
 from app.core.exceptions import JobCancelled, ProjectError
@@ -400,6 +401,7 @@ class QCService:
             raise QCError("Nothing failed in that run.")
         return self._start(p, set(failed), trigger="retry", scope={"categories": failed, "scene_ids": []}, force=True, replace_run=rec["run_id"], on_done=on_done, on_error=on_error)
 
+    @profiler.timed("qc.start")
     def _start(self, p: Project, selected: set[str], *, trigger: str, scope: dict[str, Any], force: bool, scene_ids: list[str] | None = None, replace_run: str = "",
                on_done: Callable[[QCRun], None] | None, on_error: Callable[[Job], None] | None, rendered_file: Path | None = None) -> Job:
         if self.running:

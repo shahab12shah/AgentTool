@@ -14,6 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
+from app.performance.profiler import profiler
 from app.core.commands import Command
 from app.core.events import EventBus, Topics
 from app.jobs.job import Job
@@ -158,6 +159,7 @@ class RenderService:
         return self._jobs.submit("render.preflight", work, title="Checking the project before export", on_complete=lambda j: on_done(j.result))
 
     # ------------------------------------------------------------------ export
+    @profiler.timed("render.start")
     def start_export(self, output: Path | None = None, *, overwrite: bool = False, allow_proxy_assets: set[str] | None = None, settings: RenderSettings | None = None,
                      kind: str = "export", force_cpu: bool = False, skip_preflight: bool = False, qc_override: bool = False) -> RenderJob:
         """Autosave, checkpoint, preflight, freeze a snapshot and queue the render. Raises ``PreflightFailed`` when something blocks it and ``QCGateBlocked`` when the current
