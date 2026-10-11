@@ -97,28 +97,36 @@ class PriorityWorkQueue:
     # ------------------------------------------------------------------ requests
     def submit(self, key: str, payload: Any, priority: Any = REQUESTED) -> bool:
         """Queue ``key``; a second request for the same key coalesces (and may raise its priority). Returns True when a new task was created."""
+        return self.submit_many([(key, payload)], priority) > 0
+
+    def submit_many(self, items: Iterable[tuple[str, Any]], priority: Any = REQUESTED) -> int:
+        """Queue a batch under one lock and wake the workers once (so a fast worker cannot drain the queue between two items of the same batch). Returns the new tasks."""
         cls = as_class(priority)
+        made = 0
         with self._lock:
             if self._closed:
-                return False
-            t = self._tasks.get(key)
-            if t is not None:
-                self.stats.coalesced += 1
-                profiler.incr(f"{self.name}.coalesced")
-                t.base = cls if t.base is None else min(t.base, cls)
-                self._retarget(t, min(t.prio, cls))
-                new = False
-            else:
-                self._failed.pop(key, None)
-                self._seq += 1
-                t = _Task(key, payload, cls, cls, self._seq)
-                self._tasks[key] = t
-                self._counts[cls] += 1
-                heapq.heappush(self._heap, (cls, t.seq, t.version, key))
-                self.stats.submitted += 1
-                new = True
+                return 0
+            for key, payload in items:
+                made += self._add(key, payload, cls)
         self.kick()
-        return new
+        return made
+
+    def _add(self, key: str, payload: Any, cls: int) -> int:
+        t = self._tasks.get(key)
+        if t is not None:
+            self.stats.coalesced += 1
+            profiler.incr(f"{self.name}.coalesced")
+            t.base = cls if t.base is None else min(t.base, cls)
+            self._retarget(t, min(t.prio, cls))
+            return 0
+        self._failed.pop(key, None)
+        self._seq += 1
+        t = _Task(key, payload, cls, cls, self._seq)
+        self._tasks[key] = t
+        self._counts[cls] += 1
+        heapq.heappush(self._heap, (cls, t.seq, t.version, key))
+        self.stats.submitted += 1
+        return 1
 
     def set_visible(self, keys: Iterable[str], payload_for: Callable[[str], Any | None]) -> None:
         """Keys on screen now: they run first. Keys that were only queued for being visible and are no longer are dropped; the rest fall back to their own priority."""

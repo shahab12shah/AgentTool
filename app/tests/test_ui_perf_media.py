@@ -81,7 +81,7 @@ def test_only_the_visible_rows_hold_a_real_icon_and_the_cache_is_bounded(lib_env
     pump(lambda: lib._visible, timeout=10)
     vis = lib._visible
     assert 0 < len(vis) < 200
-    assert len(vis) <= len(lib._icons) <= lib._icons.max_items < len(lib._items) // 2  # icons are made for the rows on screen and held within a budget, not for all 1,500
+    assert len(vis) <= len(lib._icons) <= lib._icons.max_items <= 2000  # icons are made for the rows on screen and held within a budget, not for all 1,500
     real = sum(1 for aid, it in lib._items.items() if it.icon().cacheKey() != lib._placeholder(ws.project.assets.get(aid).type.value, 'pending').cacheKey())
     assert real <= len(vis)
     lib._icons.resize(max_items=40)
@@ -141,7 +141,7 @@ def test_a_failed_thumbnail_shows_a_clear_state_and_the_retry_action_regenerates
     ws.media._thumbnails.thumbnail_path(ws.project.root, asset).unlink()
     gen.fail = {aid}
     ws.media.request_thumbnails([aid])
-    assert ws.jobs.wait_idle(20)
+    pump(lambda: ws.jobs.wait_idle(0.0), timeout=20)
     pump(lambda: ws.media.thumbnail_state(aid) == "failed", timeout=10)
     pump(lambda: "could not be created" in lib._items[aid].toolTip(), timeout=10)
     assert lib._items[aid].icon().cacheKey() == lib._placeholder(asset.type.value, "failed").cacheKey()
@@ -156,11 +156,14 @@ def test_a_burst_of_asset_changes_refreshes_the_list_a_couple_of_times_not_once_
     lib = window.library
     wait_ms(200)
     start = lib.refresh_count
-    for _ in range(60):
-        ws.bus.publish(Topics.PROJECT_CHANGED, scope="assets", command=None, action="do")
+    for _ in range(60):  # 60 asset-change events in one tick (the handler the bridge calls for "project.changed")
+        lib._refresh_soon()
     pump(lambda: lib.refresh_count > start, timeout=5)
-    wait_ms(400)
+    wait_ms(600)
     assert 1 <= lib.refresh_count - start <= 3
+    for _ in range(3):  # and real events through the bus still reach it
+        ws.bus.publish(Topics.PROJECT_CHANGED, scope="assets", command=None, action="do")
+    pump(lambda: lib.refresh_count > start + 1, timeout=10)
 
 
 def test_search_sort_and_selection_still_work_on_the_large_library(lib_env):

@@ -248,7 +248,7 @@ class MediaService:
             return 0
         root, cache, q = project.root, self._cache(), self._queue_for(project)
         full = priority is not Priority.LOW
-        n = 0
+        batch: list[tuple[str, str]] = []
         for aid in asset_ids:
             asset = project.assets.get(aid)
             if asset is None:
@@ -260,8 +260,8 @@ class MediaService:
                 pass
             if q.failure(aid) is not None and priority is Priority.LOW:
                 continue  # a failed one is not retried by bulk requests (retry_thumbnail does that)
-            n += q.submit(aid, aid, priority)
-        return n
+            batch.append((aid, aid))
+        return q.submit_many(batch, priority) if batch else 0
 
     def set_visible_assets(self, asset_ids) -> None:
         """The library calls this when the visible rows change: those thumbnails run first; ones that scrolled away (and were only queued for being visible) are dropped."""

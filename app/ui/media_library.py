@@ -37,7 +37,7 @@ ICON_SIZE = QSize(128, 72)
 SORTS = ("Date added", "Name", "Type", "Duration")
 GRID = QSize(140, 118)
 ICON_BYTES = ICON_SIZE.width() * ICON_SIZE.height() * 4
-MIN_ICONS, DEFAULT_ICONS, MAX_ICONS = 200, 600, 3000
+MIN_ICONS, DEFAULT_ICONS, MAX_ICONS = 200, 600, 2000
 SCROLL_DEBOUNCE_MS = 40
 REFRESH_BURST_MS = 120
 MISSING_TTL = 5.0
@@ -106,6 +106,7 @@ class MediaLibrary(QWidget):
         self._missing: dict[str, tuple[bool, float]] = {}
         self._placeholders: dict[tuple, QIcon] = {}
         self._last_refresh = 0.0
+        self._last_cost = 0.0  # how long the last rebuild took: bursts are spaced at several times that
         self.refresh_count = 0
 
         self.search = QLineEdit()
@@ -195,7 +196,7 @@ class MediaLibrary(QWidget):
 
     def _refresh_soon(self) -> None:
         """A burst of asset changes (importing 100 files) refreshes once at the start and once at the end, not 100 times."""
-        if time.monotonic() - self._last_refresh >= REFRESH_BURST_MS / 1000.0 and not self._refresh_timer.isActive():
+        if time.monotonic() - self._last_refresh >= max(REFRESH_BURST_MS / 1000.0, 3 * self._last_cost) and not self._refresh_timer.isActive():
             self.refresh()
         else:
             self._refresh_timer.start()
@@ -205,7 +206,7 @@ class MediaLibrary(QWidget):
         with profiler.timer("ui.library.refresh"):
             self._refresh_timer.stop()
             self.refresh_count += 1
-            self._last_refresh = time.monotonic()
+            began = time.monotonic()
             selected = {i.data(Qt.ItemDataRole.UserRole) for i in self.list.selectedItems()}
             self._configure_icon_budget()
             self.list.setUpdatesEnabled(False)
@@ -235,6 +236,8 @@ class MediaLibrary(QWidget):
             self._update_buttons()
             self._visible = set()
             self._fill_visible()
+            self._last_cost = time.monotonic() - began
+            self._last_refresh = time.monotonic()  # measured from the END of a refresh: a slow rebuild must not make the next event of a burst look "late"
 
     def _label(self, asset: Asset) -> str:
         sub = asset.type.value.capitalize()
@@ -260,7 +263,7 @@ class MediaLibrary(QWidget):
             lim = self.ctx.ws.performance.limits()
         except Exception:  # noqa: BLE001 - the performance service is optional plumbing
             pass
-        n = DEFAULT_ICONS if lim is None else int(lim.memory_cache_bytes * 0.05 // ICON_BYTES)
+        n = DEFAULT_ICONS if lim is None else int(lim.memory_cache_bytes * 0.02 // ICON_BYTES)
         n = max(MIN_ICONS, min(MAX_ICONS, n))
         if n != self._icons.max_items:
             self._icons.resize(max_items=n)

@@ -90,6 +90,9 @@ class Workspace:
         self.qc.tracker = self.changes
         self.performance = PerformanceService(self.projects, self.jobs, self.bus, self.commands.execute, lambda: self.settings, self.settings_store.save,
                                               lambda: self.render.engine.hardware, proxy_in_use=lambda p: any(r.proxy_path == str(p) for r in self.render.proxies.records().values() if r.proxy_status in ("READY", "QUEUED")))
+        from app.performance.media_wiring import wire_media_performance  # noqa: PLC0415
+
+        wire_media_performance(self)  # thumbnails / proxies / waveforms / probe use the cache index, the limits and the project's policy
         self.research.analysis = AnalysisCache(lambda: self.performance.cache)  # unchanged analysis is not computed again
         self.render.qc_gate = self.qc.export_gate  # the export is blocked only by a QC run that still matches the project
         self._install_fix_engine()
