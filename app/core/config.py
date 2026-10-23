@@ -45,6 +45,8 @@ class Settings:
     performance: dict = field(default_factory=dict)
     # Phase 10: timeline editing preferences (tool excluded): ripple mode / scope, snapping, linked selection, playhead following. Plain dict, validated by app.timeline.edit_state.TimelineEditState.from_dict
     timeline_ui: dict = field(default_factory=dict)
+    # Phase 10: user-customised timeline keyboard shortcuts, {action id: [key sequences]}; only the overrides of the defaults are stored. Validated by app.ui.timeline_shortcuts.TimelineShortcuts
+    timeline_shortcuts: dict = field(default_factory=dict)
 
     def sanitized(self) -> "Settings":
         """Return a copy with out-of-range values replaced by safe ones."""
@@ -67,6 +69,8 @@ class Settings:
             s.performance = {}
         if not isinstance(s.timeline_ui, dict):
             s.timeline_ui = {}
+        if not isinstance(s.timeline_shortcuts, dict):
+            s.timeline_shortcuts = {}
         return s
 
 

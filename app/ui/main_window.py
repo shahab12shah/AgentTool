@@ -146,6 +146,7 @@ class MainWindow(QMainWindow):
         self.redo_action.setShortcuts([QKeySequence("Ctrl+Shift+Z"), QKeySequence("Ctrl+Y")])
         self.settings_action = act("Settings", self.open_settings, QKeySequence("Ctrl+,"))
         self.performance_action = act("Performance", self.open_performance)
+        self.shortcuts_action = act("Keyboard Shortcuts…", self.open_shortcuts, tip="See and change the timeline keyboard shortcuts")
 
         file_menu = self.menuBar().addMenu("&File")
         for a in (self.new_action, self.open_action, self.save_action, self.save_as_action, self.close_action):
@@ -159,8 +160,13 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.undo_action)
         edit_menu.addAction(self.redo_action)
         edit_menu.addSeparator()
+        edit_menu.addAction(self.shortcuts_action)
         edit_menu.addAction(self.settings_action)
         edit_menu.addAction(self.performance_action)
+        # Phase 10: the Timeline menu lists the timeline actions with their CURRENT keys (read from the shortcut registry) and greys out what is not possible right now
+        self.timeline_menu = self.menuBar().addMenu("&Timeline")
+        self.timeline_panel.shortcuts.populate_menu(self.timeline_menu)
+        self.timeline_panel.shortcuts.apply()  # now that every main-window action exists, keys they use are reserved
 
     def _build_toolbar(self) -> None:
         bar = QToolBar("Main")
@@ -263,6 +269,11 @@ class MainWindow(QMainWindow):
         self.qc_panel.replace_visual_requested.connect(self._research_scene)
         self.qc_panel.search_again_requested.connect(self._qc_search_again)
         self.timeline_panel.qc_issue_requested.connect(self._qc_show_issue)
+        self.timeline_panel.request_inspector.connect(self._show_in_inspector)
+        self.timeline_panel.request_speed_dialog.connect(lambda cid: self._inspector_dialog("open_speed_dialog", cid, "The speed dialog"))
+        self.timeline_panel.request_replace_dialog.connect(lambda cid: self._inspector_dialog("open_replace_dialog", cid, "The replace-media dialog"))
+        self.timeline_panel.set_history_actions(self.undo_action, self.redo_action)
+        self.library.list.itemSelectionChanged.connect(self.timeline_panel.update_controls)  # "Add selected media" follows the library selection
         self.project_view.close_requested.connect(self.close_project)
         for topic in ("project.opened", "project.closed", "project.dirty_changed", "project.saved"):
             b.on(topic, lambda p: self._sync_state())
@@ -301,6 +312,7 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(stylesheet(self.ws.settings.theme))
+        self.timeline_panel.apply_theme()
         self.autosave_timer.start(self.ws.settings.autosave_interval_seconds * 1000)
 
     # ------------------------------------------------------------ navigation
@@ -388,7 +400,30 @@ class MainWindow(QMainWindow):
         self.preview.show_asset(asset)
 
     def _add_to_timeline(self, asset_id: str) -> None:
-        self.ctx.guard(self, lambda: self.ws.timeline.add_asset(asset_id, None, self.timeline_panel.canvas.playhead), modal=True, title="Add to timeline")
+        self.ctx.guard(self, lambda: self.ws.edit.place_assets([asset_id], self.timeline_panel.canvas.playhead), modal=True, title="Add to timeline")
+
+    def _show_in_inspector(self, clip_id: str) -> None:
+        """The canvas asked to show a clip's properties: select it and bring the inspector into focus."""
+        project = self.ws.project
+        if project is None or project.timeline.get_clip(clip_id) is None:
+            return
+        if clip_id not in self.ws.selection:
+            self.ws.select_clip(clip_id)
+        focus = getattr(self.inspector, "focus_clip", None)
+        if focus is not None:
+            focus(clip_id)
+        else:
+            self.inspector.setFocus()
+
+    def _inspector_dialog(self, method: str, clip_id: str, what: str) -> None:
+        open_dialog = getattr(self.inspector, method, None)
+        if open_dialog is None:
+            self.ctx.status(f"{what} is not available in this version of the inspector.")
+            return
+        self.ctx.guard(self, lambda: open_dialog(clip_id), modal=True, title="Clip")
+
+    def open_shortcuts(self) -> None:
+        self.timeline_panel.shortcuts.open_dialog()
 
     # ------------------------------------------------------------ project actions
     def _confirm_close_project(self) -> bool:
