@@ -32,7 +32,17 @@ from app.performance.profiler import profiler
 from app.ui.context import UiContext
 from app.ui.theme import palette
 
-ASSET_MIME = "application/x-agenttool-asset"
+ASSET_MIME = "application/x-agenttool-asset"  # payload: one or more asset ids, newline separated, in selection order
+
+
+def asset_ids_from_mime(mime) -> list[str]:
+    """The asset ids a drag from the library carries (a single plain id is a payload of one). Empty when the data is not ours."""
+    if mime is None or not mime.hasFormat(ASSET_MIME):
+        return []
+    raw = bytes(mime.data(ASSET_MIME)).decode("utf-8", "replace")
+    return [s.strip() for s in raw.split("\n") if s.strip()]
+
+
 ICON_SIZE = QSize(128, 72)
 SORTS = ("Date added", "Name", "Type", "Duration")
 GRID = QSize(140, 118)
@@ -73,9 +83,11 @@ class _AssetList(QListWidget):
         self.viewport_changed.emit()
 
     def mimeData(self, items) -> QMimeData:  # noqa: N802
+        """Every dragged item, in the order Qt hands them over (the selection order), as newline-separated asset ids in ``ASSET_MIME``."""
         data = QMimeData()
-        if items:
-            data.setData(ASSET_MIME, items[0].data(Qt.ItemDataRole.UserRole).encode())
+        ids = [str(i.data(Qt.ItemDataRole.UserRole)) for i in items if i is not None and i.data(Qt.ItemDataRole.UserRole)]
+        if ids:
+            data.setData(ASSET_MIME, "\n".join(ids).encode())
         return data
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802

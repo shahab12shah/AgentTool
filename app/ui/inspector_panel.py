@@ -11,6 +11,7 @@ are shown (a mixed value reads as an em dash) and one edit changes all of them i
 
 from __future__ import annotations
 
+from html import escape as _esc_html
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt, Signal
@@ -63,6 +64,7 @@ from app.timeline.track import Track
 from app.ui.context import UiContext
 from app.ui.dialogs import replace_media_dialog, speed_dialog
 from app.ui.keyframe_editor import KeyframeEditor
+from app.ui.theme import palette
 from app.ui.timecode_edit import NumberEdit, TimecodeEdit
 
 SPEED_PRESETS = speed_dialog.PRESETS
@@ -76,6 +78,10 @@ LOCK_TIP = {"item": "Locks the whole clip: no manual edit is accepted and AI reg
             "audio": "Stops volume, fades, pan, mute and volume keyframes.", "style": "Stops text, caption, crop, fit and transition changes."}
 NOT_RESETTABLE = frozenset({"operation", "asset_id", "track_id", "asset_duration", "source_out", "speed", "reason", "slot", "kind_hint"})  # derived or bookkeeping parameters
 KIND_LABEL = {"video": "video", "image": "image", "audio": "audio", "caption": "caption", "text": "text", "graphic": "graphic"}
+
+
+def _esc(text: object) -> str:
+    return _esc_html(str(text), quote=False)
 
 
 def _spin(low: float, high: float, step: float, decimals: int = 3, suffix: str = "") -> QDoubleSpinBox:
@@ -117,6 +123,8 @@ class InspectorPanel(QWidget):
         self._clip_id: str | None = None  # the primary selected clip
         self._ids: list[str] = []  # every selected clip that still exists
         self._busy = False
+        self._word_sig: list | None = None
+        self._has_transition = False
         self._reset_sig: tuple = ()
         self._tips: dict[QWidget, str] = {}
         self._gates: dict[str, list[QWidget]] = {k: [] for k in ("position", "timing", "transform", "audio", "style")}
@@ -165,7 +173,7 @@ class InspectorPanel(QWidget):
 
         b = ctx.bridge
         b.on("selection.changed", lambda p: (self._clear_notice(), self.refresh()))
-        b.on("project.changed", lambda p: self.refresh() if p.get("scope") in ("timeline", "assets", "editing", "presentation") else None)
+        b.on("project.changed", lambda p: self.refresh() if p.get("scope") in ("timeline", "assets", "editing", "presentation", "research", "scenes") else None)
         for topic in ("project.opened", "project.closed"):
             b.on(topic, lambda p: self.refresh())
         b.on("timeline.playhead", lambda p: self._on_playhead())
@@ -284,6 +292,7 @@ class InspectorPanel(QWidget):
         row2.addWidget(self.ai_manual)
         v.addLayout(row2)
         self.ai_resets = QVBoxLayout()
+        self.reset_buttons: list[QPushButton] = []  # one "Reset <property> to AI value" button per property the user changed AND whose AI original is stored
         v.addLayout(self.ai_resets)
         self.ai_lock = QCheckBox("Locked (protected from AI regeneration)")
         self.ai_lock.setToolTip("Keeps this clip when the scene is regenerated. It does not stop your own edits: use “Lock item” under Locks & relations for that.")
@@ -571,7 +580,7 @@ class InspectorPanel(QWidget):
 
     def _notify(self, text: str, error: bool = True) -> None:
         self.notice.setText(text)
-        self.notice.setStyleSheet("color: #ff6b6b;" if error else "")
+        self.notice.setStyleSheet(f"color: {palette(self.ctx.ws.settings.theme)['danger']};" if error else "")
         self.notice.setVisible(bool(text))
 
     def _clear_notice(self) -> None:
@@ -581,7 +590,8 @@ class InspectorPanel(QWidget):
     def _on_playhead(self) -> None:
         if not self._ids:
             return
-        self._update_caption_buttons()
+        if self.sections["caption"].isVisibleTo(self):
+            self._update_split_button()
         if self.kf.available:
             self.kf.update_playhead()
 
@@ -791,12 +801,13 @@ class InspectorPanel(QWidget):
         _set_combo(self.cap_highlight, str(t.get("highlight_mode", "HIGHLIGHT")))
         words = t.get("words") or []
         sig = [(w.get("text"), w.get("start"), w.get("end")) for w in words if isinstance(w, dict)]
-        if sig != getattr(self, "_word_sig", None):
+        if sig != self._word_sig:
             self._word_sig = sig
             self.cap_words.clear()
             for text, a, b in sig:
                 self.cap_words.addItem(QListWidgetItem(f"{text}    {tb.format(a)} – {tb.format(b)}"))
-        self._update_caption_buttons()
+        self._update_merge_button()
+        self._update_split_button()
 
     def _next_caption(self, clip: Clip) -> Clip | None:
         p = self._project()
@@ -805,14 +816,21 @@ class InspectorPanel(QWidget):
         i = next((k for k, c in enumerate(order) if c.id == clip.id), -1)
         return order[i + 1] if 0 <= i < len(order) - 1 else None
 
-    def _update_caption_buttons(self) -> None:
+    def _update_merge_button(self) -> None:
         clip = self._primary()
-        if clip is None or clip.kind != "caption" or not self.sections["caption"].isVisibleTo(self):
+        if clip is None or clip.kind != "caption":
             return
         nxt = self._next_caption(clip)
-        self.cap_merge.setEnabled(nxt is not None and nxt.kind == "caption")
-        self.cap_merge.setToolTip("Join this caption and the one after it into one caption (they must follow each other closely)."
-                                  if self.cap_merge.isEnabled() else "There is no caption after this one on the track.")
+        reason = self._lock_reason([clip], "style")
+        ok = nxt is not None and nxt.kind == "caption" and not reason
+        self.cap_merge.setEnabled(ok)
+        self.cap_merge.setToolTip(reason or ("Join this caption and the one after it into one caption (they must follow each other closely)." if ok
+                                             else "There is no caption after this one on the track."))
+
+    def _update_split_button(self) -> None:
+        clip = self._primary()
+        if clip is None or clip.kind != "caption":
+            return
         head = self.ctx.ws.edit.playhead
         inside = clip.timeline_start + 1e-6 < head < clip.timeline_end - 1e-6
         reason = self._lock_reason([clip], "timing")
@@ -888,15 +906,6 @@ class InspectorPanel(QWidget):
                 self.trans_remove.setToolTip("This clip has no transition.")
             elif not reason:
                 self.trans_remove.setToolTip("Remove the transition into this clip.")
-        if self.sections["caption"].isVisibleTo(self):
-            self._update_caption_buttons()
-            reason = self._lock_reason(clips, "style")
-            nxt_ok = self.cap_merge.isEnabled()
-            if reason:
-                self.cap_merge.setEnabled(False)
-                self.cap_merge.setToolTip(reason)
-            else:
-                self.cap_merge.setEnabled(nxt_ok)
         self._gate_presentation(clips)
 
     def _gate_presentation(self, clips: list[Clip]) -> None:
@@ -931,7 +940,7 @@ class InspectorPanel(QWidget):
             rows += [f"Asset {d['asset']}", f"Start {d['start']:.2f}s · End {d['end']:.2f}s", f"Fade in {d['fade_in']:.2f}s · out {d['fade_out']:.2f}s"
                      + (f" · {len(d['keyframes'])} ducking keyframes" if kind == "MUSIC" else f" · {d['category']}")]
         if d["reason"]:
-            rows.append(f"<i>Reason: “{d['reason']}”</i>")
+            rows.append(f"<i>Reason: “{_esc(d['reason'])}”</i>")
         self.pres_info.setText("<br>".join(rows))
         texty = kind in ("CAPTION", "GRAPHIC")
         self.pres_text.setVisible(texty)
@@ -967,11 +976,12 @@ class InspectorPanel(QWidget):
 
     # ----- AI decision box
     def _ai_owned(self, clip: Clip) -> bool:
-        ws = self.ctx.ws
+        """True while the AI still owns the clip: it created it, or its own decision (``ai_decision_id``) is still the AI's."""
         if clip.created_by == "AI":
             return True
-        return any(d.created_by is Creator.AI for d in ws.editing.decisions_for_clip(clip.id)) or \
-            any(d.created_by is Creator.AI for d in self._presentation_decisions(clip))
+        p = self._project()
+        d = p.editing_decisions.get(clip.ai_decision_id) or p.presentation_decisions.get(clip.ai_decision_id) if clip.ai_decision_id else None
+        return d is not None and d.created_by is Creator.AI
 
     def _presentation_decisions(self, clip: Clip) -> list:
         p = self._project()
@@ -997,8 +1007,8 @@ class InspectorPanel(QWidget):
         pd = desc.get("decision") if desc else None
         if desc is None:
             self.ai_info.setText(
-                (f"<b>{dec.type.value.replace('_', ' ').title()}</b> — {dec.confidence:.0f}% · created by {dec.created_by.value}<br><i>“{dec.reason}”</i>" if dec else
-                 f"Created by {clip.created_by}") + "<br>Open the AI Edit page to change its parameters.")
+                (f"<b>{dec.type.value.replace('_', ' ').title()}</b> — {dec.confidence:.0f}% · created by {dec.created_by.value}<br><i>“{_esc(dec.reason)}”</i>" if dec else
+                 f"Created by {_esc(clip.created_by)}") + "<br>Open the AI Edit page to change its parameters.")
         else:
             self.ai_info.setText(f"Presentation decision {pd.decision_id} ({pd.type.value.replace('_', ' ').lower()})." if pd else "This object has no recorded AI decision.")
         self.ai_factors.setText(self._factors_html(clip, dec, pd))
@@ -1024,16 +1034,16 @@ class InspectorPanel(QWidget):
         rows: list[str] = []
         scene = next((s for s in p.scenes if s.id == clip.scene_id), None) if clip.scene_id else None
         if scene is not None:
-            rows.append(f"Scene {scene.label} ({scene.start:.1f}–{scene.end:.1f} s)")
+            rows.append(f"Scene {_esc(scene.label)} ({scene.start:.1f}–{scene.end:.1f} s)")
         d = dec or pd
         if d is not None and d.slot:
-            rows.append(f"Role: {d.slot}")
+            rows.append(f"Role: {_esc(d.slot)}")
         if dec is not None:
             par = dec.parameters
             bits = []
             for key in ("operation", "kind", "type", "style"):
                 if key in par and isinstance(par[key], (str, int, float)):
-                    bits.append(f"{key.replace('_', ' ')} {par[key]}")
+                    bits.append(f"{key.replace('_', ' ')} {_esc(par[key])}")
             if "source_in" in par and "source_out" in par:
                 bits.append(f"source {float(par['source_in']):.2f}–{float(par['source_out']):.2f} s")
             if bits:
@@ -1045,11 +1055,11 @@ class InspectorPanel(QWidget):
             va = p.visual_assignments.get(clip.scene_id)
             if va is not None:
                 score = f"accuracy {va.accuracy_score:.0f}%" if va.accuracy_score is not None else "accuracy not scored"
-                rows.append(f"Visual: {score}, chosen by {va.selected_by}")
+                rows.append(f"Visual: {score}, chosen by {_esc(va.selected_by)}")
                 cs = p.candidate_scores.get(va.candidate_id) if va.candidate_id else None
                 if cs is not None:
-                    rows.append(f"Match score {cs.overall:.0f} ({cs.category.value.lower() if hasattr(cs.category, 'value') else cs.category})" + (f": {cs.reason}" if cs.reason else ""))
-                    rows += [str(f) for f in cs.factors[:4]]
+                    rows.append(f"Match score {cs.overall:.0f} ({_esc(cs.category.value.lower() if hasattr(cs.category, 'value') else cs.category)})" + (f": {_esc(cs.reason)}" if cs.reason else ""))
+                    rows += [_esc(f) for f in cs.factors[:4]]
             cands = [c for c in p.visual_candidates.values() if c.scene_id == clip.scene_id]
             usable = [c for c in cands if c.asset_id and p.assets.get(c.asset_id) and c.asset_id != clip.asset_id]
             if cands:

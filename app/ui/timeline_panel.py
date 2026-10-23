@@ -380,7 +380,7 @@ class TrackHeaders(QWidget):
             track, y, h = tracks[i], layout.top(i), layout.height(i)
             p.fillRect(0, y, HEADER_W, h, QColor(c["panel"] if i % 2 == 0 else c["panel2"]))
             p.setPen(QColor(c["border"]))
-            p.drawLine(0, y + h, HEADER_W, y + h)
+            p.drawLine(0, y + h - 1, HEADER_W, y + h - 1)  # the last pixel row of the row: the next row's fill would paint over a line at y + h
             col = self._kind_color(c, track.kind)
             if track.hidden:
                 col.setAlpha(90)
@@ -535,8 +535,13 @@ class TrackHeaders(QWidget):
             self._sync_sizes()
 
     def _sync_sizes(self) -> None:
+        """Resize the header column and the canvas to the layout (the canvas sizes itself: it knows what else lives below the last row)."""
         self.setFixedHeight(self.layout_.total_height)
-        self.canvas.setFixedHeight(self.layout_.total_height)
+        apply_size = getattr(self.canvas, "_apply_size", None)
+        if apply_size is not None:
+            apply_size()
+        else:
+            self.canvas.setFixedHeight(self.canvas.content_height())
         self.canvas.update()
         self.update()
 
@@ -772,7 +777,7 @@ class TimelinePanel(QWidget):
         b.on("selection.changed", lambda p: (self.canvas.update(), self.update_controls()))
         b.on("timeline.edit_state_changed", lambda p: self._sync_edit_state())
         b.on("timeline.playhead", lambda p: self.transport.on_playhead(float(p.get("time", 0.0))))
-        b.on("commands.changed", lambda p: (self.transport.stop(), self._sync_history()))
+        b.on("commands.changed", lambda p: (self.transport.stop(), self._sync_history(), self.update_controls()))  # every edit, undo and redo: enable states follow at once
         self._reload_gate = False
         self._reload_pending = False
         self.apply_theme()

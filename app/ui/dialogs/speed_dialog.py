@@ -111,7 +111,7 @@ def apply_speed(ctx: UiContext, parent: QWidget | None, clip_ids: Sequence[str],
         try:
             run(None)
         except SpeedChoiceRequired as exc:
-            choice = _choose(parent, exc, labels(exc))
+            choice = choose_link_policy(parent, exc, labels(exc))  # (looked up in the module at call time, so tests can replace it)
             if choice is None:
                 result["cancelled"] = True
                 return
@@ -127,12 +127,6 @@ def apply_speed(ctx: UiContext, parent: QWidget | None, clip_ids: Sequence[str],
 
     ok = ctx.guard(parent, wrapped)
     return (ok and result["ok"]), result["msg"]
-
-
-def _choose(parent: QWidget | None, exc: SpeedChoiceRequired, labels: Sequence[str]) -> str | None:
-    import app.ui.dialogs.speed_dialog as me  # noqa: PLC0415  (module attribute lookup: tests patch ``choose_link_policy``)
-
-    return me.choose_link_policy(parent, exc, labels)
 
 
 class SpeedDialog(QDialog):

@@ -58,6 +58,7 @@ class TimecodeEdit(QLineEdit):
     def set_seconds(self, seconds: float | None, *, force: bool = False) -> None:
         """Show ``seconds`` (``None`` = not applicable / mixed values: shows an em dash). Ignored while the user is typing unless ``force``."""
         if self.is_editing() and not force:
+            self._value = None if seconds is None else float(seconds)  # remembered: discarding the edit shows the latest model value
             return
         self._value = None if seconds is None else float(seconds)
         self._shown = MIXED if seconds is None else self._tb.format(seconds)
@@ -86,10 +87,18 @@ class TimecodeEdit(QLineEdit):
 
     # ------------------------------------------------------------------ validation
     def _flag(self, message: str) -> None:
+        if bool(message) != self._flagged:
+            self.setStyleSheet(_BAD_STYLE if message else "")
         self._flagged = bool(message)
-        self.setStyleSheet(_BAD_STYLE if message else "")
         if message:
             self.setToolTip(message)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Escape and self.is_editing():
+            self.discard_edit()  # Escape throws an uncommitted edit away
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def parse(self, text: str) -> float:
         """Seconds for typed text (raises ``ValueError`` with the reason)."""
@@ -224,6 +233,7 @@ class NumberEdit(QDoubleSpinBox):
     def set_model(self, value: float | None, *, force: bool = False) -> None:
         """Show a model value (``None`` = mixed). Ignored while the user is typing unless ``force``."""
         if self.is_editing() and not force:
+            self._model = None if value is None else float(value)  # remembered: discarding the edit shows the latest model value
             return
         self._mixed = value is None
         self._model = None if value is None else float(value)
@@ -257,13 +267,21 @@ class NumberEdit(QDoubleSpinBox):
 
     # ------------------------------------------------------------------ validation hint
     def _flag(self, message: str) -> None:
+        if bool(message) != self._flagged:
+            self.setStyleSheet(_BAD_STYLE if message else "")
         self._flagged = bool(message)
-        self.setStyleSheet(_BAD_STYLE if message else "")
         if message:
             self.setToolTip(message)
             self.hint.emit(message)
         else:
             self._refresh_tip()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Escape and self.is_editing():
+            self.discard_edit()  # Escape throws an uncommitted edit away
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _live_check(self, _text: str) -> None:
         self._mixed = self._mixed and self.lineEdit().text().strip() in (MIXED, "")
@@ -279,16 +297,13 @@ class NumberEdit(QDoubleSpinBox):
             self._flag("")
 
     def _finish(self) -> None:
-        typed = self.is_editing()
-        if self._mixed and not typed:
-            return  # a mixed field that was only entered and left
-        if not self._mixed and not typed and abs(self.value() - self._shown_value) < 1e-12:
-            self._flag("")
-            return  # nothing changed
-        if not self._mixed and abs(self.value() - self._shown_value) < 1e-12:
+        if self._model is None:  # the model values are mixed: only a number the user typed (or stepped to) counts, the dash alone does not
+            if self._mixed:
+                return  # entered and left without typing a number: the dash stays
+        elif abs(self.value() - self._shown_value) < 1e-12:
             self.lineEdit().setModified(False)
             self._flag("")
-            return  # typed the number that is already shown
+            return  # nothing changed (or the number that is already shown was typed)
         value = self.model_value()
         if not math.isfinite(value):
             self.discard_edit()
@@ -296,5 +311,7 @@ class NumberEdit(QDoubleSpinBox):
         self.lineEdit().setModified(False)
         self._flag("")
         self.committed.emit(value)
-        if self._model is not None and abs(self.value() - self._shown_value) > 1e-12:
+        if self._model is None and not self._mixed:
+            self.set_model(None, force=True)  # still mixed after the commit (the engine refused it): show the dash again
+        elif self._model is not None and abs(self.value() - self._shown_value) > 1e-12:
             self.set_model(self._model, force=True)  # nobody accepted it (the engine refused the value): show the real value again

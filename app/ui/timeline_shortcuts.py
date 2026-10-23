@@ -77,8 +77,8 @@ SPECS: tuple[ActionSpec, ...] = (
     _a("marker_next", "Next marker", G_PLAY, "Shift+M", "markers"),
     _a("tool_select", "Select tool", G_TOOLS, ("S", "V"), menu="Select tool"),
     _a("tool_blade", "Blade tool", G_TOOLS, "B", menu="Blade tool", tip="Click a clip to cut it; Shift+click cuts every unlocked track."),
-    _a("delete", "Delete", G_EDIT, ("Delete", "Backspace"), "selection", "unlocked", tip="Deletes the selected clips and leaves the gap."),
-    _a("ripple_delete", "Ripple delete", G_EDIT, ("Shift+Delete", "Shift+Backspace"), "selection", "unlocked", tip="Deletes the selected clips and closes the gap."),
+    _a("delete", "Delete", G_EDIT, ("Delete", "Backspace"), "delete_target", tip="Deletes the selected clips and leaves the gap (or the marker you point at / selected on the ruler)."),
+    _a("ripple_delete", "Ripple delete", G_EDIT, ("Shift+Delete", "Shift+Backspace"), "delete_target", tip="Deletes the selected clips and closes the gap."),
     _a("cut", "Cut", G_EDIT, "Ctrl+X", "selection", "unlocked"),
     _a("copy", "Copy", G_EDIT, "Ctrl+C", "selection"),
     _a("paste", "Paste at playhead", G_EDIT, "Ctrl+V", "project", "clipboard"),
@@ -167,6 +167,7 @@ class _State:
     attrs: bool = False
     has_range: bool = False
     markers: int = 0
+    marker_target: bool = False  # a marker is hovered / selected on the ruler: Delete removes it (the canvas' own rule) instead of clips
 
 
 _NEEDS: dict[str, Callable[[_State], str | None]] = {
@@ -178,6 +179,7 @@ _NEEDS: dict[str, Callable[[_State], str | None]] = {
     "duration": lambda s: None if s.duration > 0 else "The timeline is empty.",
     "clipboard": lambda s: None if s.clipboard else "There is nothing to paste: copy or cut clips first.",
     "attrs": lambda s: None if s.attrs else "There are no copied attributes: use “Copy attributes” on a clip first.",
+    "delete_target": lambda s: None if s.marker_target else (_NEEDS["selection"](s) or _NEEDS["unlocked"](s)),
     "range": lambda s: None if s.has_range else "There is no in / out range to clear.",
     "markers": lambda s: None if s.markers else "There are no markers on the timeline.",
 }
@@ -211,7 +213,7 @@ class TimelineShortcuts(QObject):
         self._bindings: dict[str, list[str]] = {}
         self._bound: set[str] = set()
         self._actions: dict[str, QAction] = {}  # shortcut-bearing actions (hosted on the panel)
-        self._menu_actions: dict[str, QAction] = {}  # display-only actions of the Timeline menu
+        self._menu_actions: dict[str, list[QAction]] = {}  # display-only actions of the Timeline menu(s), per action id
         self._menus: list[QMenu] = []
         self._guard = _OverrideGuard(self)
         for spec in SPECS:
@@ -270,14 +272,26 @@ class TimelineShortcuts(QObject):
             return _State()
         tl, sel = project.timeline, self.ws.selection
         ids = sel.ids
-        editable = 0
-        for cid in ids:
-            try:
-                if not tl.find_clip(cid)[0].locked:
-                    editable += 1
-            except TimelineError:
-                pass
-        return _State(True, len(ids), editable, tl.duration, self.ws.edit.clipboard is not None, bool(getattr(self.ws.edit, "_attrs", None)), tl.range is not None, len(tl.markers))
+        locked = {t.id for t in tl.tracks if t.locked}
+        editable = len(ids)
+        if locked:  # only look at the clips when some track is locked (a large selection costs nothing otherwise)
+            editable = 0
+            for cid in ids:
+                try:
+                    if tl.find_clip(cid)[0].id not in locked:
+                        editable += 1
+                except TimelineError:
+                    pass
+        return _State(True, len(ids), editable, tl.duration, self.ws.edit.clipboard is not None, bool(getattr(self.ws.edit, "_attrs", None)), tl.range is not None, len(tl.markers),
+                      self._marker_to_delete() is not None)
+
+    def _marker_to_delete(self) -> str | None:
+        """The marker the canvas' Delete key would remove (the one under the pointer, else the one selected by the last click), if the canvas has that notion."""
+        target = getattr(self.canvas, "_marker_target", None)
+        try:
+            return target() if callable(target) else None
+        except RuntimeError:  # the canvas is being destroyed
+            return None
 
     def why_not(self, aid: str, state: _State | None = None) -> str | None:
         """None when the action is possible right now, otherwise the plain-language reason it is not."""
@@ -341,7 +355,7 @@ class TimelineShortcuts(QObject):
             return []
         out: list[str] = []
         for s in seqs:
-            n = normalize(s) if isinstance(s, str) else ""
+            n = normalize(s) if isinstance(s, str) and s.strip() else ""  # (a blank string would parse as the Space key)
             if n and n not in out:
                 out.append(n)
         return out[:MAX_KEYS]
@@ -350,7 +364,14 @@ class TimelineShortcuts(QObject):
         raw = getattr(self.ws.settings, "timeline_shortcuts", None)
         if not isinstance(raw, dict):
             return {}
-        return {aid: self._parse(v) for aid, v in raw.items() if aid in self.specs and isinstance(v, (str, list, tuple))}
+        out: dict[str, list[str]] = {}
+        for aid, v in raw.items():
+            if aid not in self.specs or not isinstance(v, (str, list, tuple)):
+                continue
+            parsed = self._parse(v)
+            if parsed or (isinstance(v, (list, tuple)) and not v):  # an explicit empty list means "unbound"; a list of unusable entries is ignored (the default stays)
+                out[aid] = parsed
+        return out
 
     def _effective(self, overrides: dict[str, list[str]]) -> dict[str, list[str]]:
         """Defaults + overrides with duplicates removed: an overridden action wins a contested key over a default one; keys used by main-window actions are dropped."""
@@ -381,8 +402,9 @@ class TimelineShortcuts(QObject):
         self._bound = {k for keys in self._bindings.values() for k in keys}
         for aid, act in self._actions.items():
             act.setShortcuts([QKeySequence(k, PORTABLE) for k in self._bindings[aid]])
-        for aid, act in self._menu_actions.items():
-            act.setShortcuts([QKeySequence(k, PORTABLE) for k in self._bindings[aid]])
+        for aid, acts in self._menu_actions.items():
+            for act in acts:
+                act.setShortcuts([QKeySequence(k, PORTABLE) for k in self._bindings[aid]])
         self.changed.emit()
 
     def find_conflict(self, seq: str, aid: str, pending: dict[str, list[str]] | None = None) -> str | None:
@@ -470,7 +492,7 @@ class TimelineShortcuts(QObject):
         if aid in ("tool_select", "tool_blade", "toggle_snap", "toggle_ripple", "toggle_link"):
             act.setCheckable(True)
         act.triggered.connect(lambda _checked=False, a=aid: (self.trigger(a, from_menu=True), self.refresh_menu_state()))
-        self._menu_actions[aid] = act
+        self._menu_actions.setdefault(aid, []).append(act)
         return act
 
     def populate_menu(self, menu: QMenu) -> None:
@@ -500,12 +522,13 @@ class TimelineShortcuts(QObject):
         state = self.ws.edit_state
         checks = {"tool_select": state.tool == "select", "tool_blade": state.tool == "blade", "toggle_snap": state.snap.enabled,
                   "toggle_ripple": state.ripple_on, "toggle_link": state.linked_selection}
-        for aid, act in self._menu_actions.items():
+        for aid, acts in self._menu_actions.items():
             why = self.why_not(aid, st)
-            act.setEnabled(why is None)
-            act.setToolTip(why or self.specs[aid].tip or self.specs[aid].label)
-            if aid in checks:
-                act.setChecked(checks[aid])
+            for act in acts:
+                act.setEnabled(why is None)
+                act.setToolTip(why or self.specs[aid].tip or self.specs[aid].label)
+                if aid in checks:
+                    act.setChecked(checks[aid])
 
     # ------------------------------------------------------------ handlers (each calls the canvas or ws.edit; the engine's refusal reaches the user through ctx.guard)
     def _frames_per_second(self) -> int:
@@ -552,10 +575,18 @@ class TimelineShortcuts(QObject):
         self.ws.edit_state.update(tool="blade")
 
     def _do_delete(self) -> None:
-        self.canvas.delete_selection(ripple=False)
+        marker = self._marker_to_delete()
+        if marker is not None:
+            self.canvas.delete_marker(marker)
+        else:
+            self.canvas.delete_selection(ripple=False)
 
     def _do_ripple_delete(self) -> None:
-        self.canvas.delete_selection(ripple=True)
+        marker = self._marker_to_delete()
+        if marker is not None:
+            self.canvas.delete_marker(marker)
+        else:
+            self.canvas.delete_selection(ripple=True)
 
     def _do_cut(self) -> None:
         self.canvas.cut_selection()

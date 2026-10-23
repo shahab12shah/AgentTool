@@ -575,34 +575,34 @@ class KeyframeEditor(QWidget):
         self.time_edit.setEnabled(one)
         self.value_edit.setEnabled(one)
         tip = "" if one else "Select a single keyframe to type its time and value."
-        self.time_edit.setToolTip(tip or self.time_edit.toolTip())
         if one:
             self.time_edit.set_timebase(self._tb())
             self.time_edit.set_seconds(sel[0].time)
             self.value_edit.set_model(sel[0].value)
             self.time_edit.set_base_tooltip("Keyframe time from the start of the clip: HH:MM:SS:FF, seconds (1.25) or frames (12f).")
+            self.value_edit.set_base_tooltip("")
         else:
             self.time_edit.set_seconds(None, force=True)
             self.value_edit.set_model(None, force=True)
-            self.value_edit.setToolTip(tip)
+            self.time_edit.set_base_tooltip(tip)
+            self.value_edit.set_base_tooltip(tip)
         shared = {k.interpolation for k in sel}
         self.interp_combo.setEnabled(bool(sel))
         self.interp_combo.setToolTip("" if sel else "Select keyframes to change how the value travels to the next keyframe.")
         if len(shared) == 1:
             self.interp_combo.setCurrentIndex(max(0, self.interp_combo.findData(next(iter(shared)))))
-        reason = self.lock_reason(self.prop()) if self.available else ""
-        if reason:
-            for w in (self.time_edit, self.value_edit, self.interp_combo, self.delete_btn, self.paste_btn, self.add_btn):
-                w.setEnabled(False)
-                w.setToolTip(reason)
-        else:
-            self.paste_btn.setEnabled(True)
         self.copy_btn.setEnabled(bool(self.lane.keyframes()))
         self.copy_btn.setToolTip("Copy the selected keyframes (all keyframes of this property when none is selected)." if self.lane.keyframes() else "There are no keyframes to copy.")
         self.delete_btn.setEnabled(bool(sel))
         self.delete_btn.setToolTip("" if sel else "Select keyframes first.")
+        self.paste_btn.setEnabled(True)
         self.paste_btn.setToolTip("Paste the copied keyframes so the earliest one lands at the playhead.")
         self._sync_nav()
+        reason = self.lock_reason(self.prop()) if self.available else ""
+        if reason:  # a locked track / clip / aspect: the lane only shows, every editing control says why it is off
+            for w in (self.time_edit, self.value_edit, self.interp_combo, self.delete_btn, self.paste_btn, self.add_btn):
+                w.setEnabled(False)
+                (w.set_base_tooltip if hasattr(w, "set_base_tooltip") else w.setToolTip)(reason)
 
     def _sync_nav(self) -> None:
         local = self._local_playhead()
@@ -622,6 +622,10 @@ class KeyframeEditor(QWidget):
         self.next_btn.setToolTip("" if next_t is not None else "There is no later keyframe on this property.")
         self.add_btn.setEnabled(local is not None)
         self.add_btn.setToolTip("Add a keyframe at the playhead with the value the property has there." if local is not None else "Move the playhead inside the clip first.")
+        reason = self.lock_reason(self.prop()) if self.available else ""
+        if reason:
+            self.add_btn.setEnabled(False)
+            self.add_btn.setToolTip(reason)
 
     # ------------------------------------------------------------------ actions (each = one ws.edit call)
     def _run(self, action: Callable[[], object]) -> bool:
