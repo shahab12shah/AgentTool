@@ -43,6 +43,8 @@ class Settings:
     chromium_path: str = ""  # empty = auto-detect
     # Phase 9: performance (see app.performance.settings.PerformanceSettings; stored as a plain dict so this module stays dependency-free)
     performance: dict = field(default_factory=dict)
+    # Phase 10: timeline editing preferences (tool excluded): ripple mode / scope, snapping, linked selection, playhead following. Plain dict, validated by app.timeline.edit_state.TimelineEditState.from_dict
+    timeline_ui: dict = field(default_factory=dict)
 
     def sanitized(self) -> "Settings":
         """Return a copy with out-of-range values replaced by safe ones."""
@@ -63,6 +65,8 @@ class Settings:
         s.use_proxies = bool(s.use_proxies)
         if not isinstance(s.performance, dict):
             s.performance = {}
+        if not isinstance(s.timeline_ui, dict):
+            s.timeline_ui = {}
         return s
 
 

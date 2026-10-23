@@ -8,6 +8,7 @@ into project files, FFmpeg or the filesystem on its own.
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace as dc_replace
 from pathlib import Path
 from typing import Callable
 
@@ -47,6 +48,8 @@ from app.services.render_service import RenderService
 from app.services.performance_service import PerformanceService
 from app.project.phase2_commands import SetVisualPreferencesCommand
 from app.storage.paths import AppPaths
+from app.timeline.edit_state import PERSISTED as EDIT_STATE_PERSISTED, TimelineEditState
+from app.timeline.selection import SelectionModel
 
 _log = get_logger(__name__)
 
@@ -99,7 +102,10 @@ class Workspace:
         self._install_fix_engine()
         self.bus.subscribe(Topics.RENDER_HISTORY_CHANGED, self._on_render_history)
         self.timeline.edit_hook = self._edit_hook
-        self.selected_clip_id: str | None = None
+        self.selection = SelectionModel()  # session state, never persisted; every change is published on the bus (Topics.SELECTION_CHANGED)
+        self.selection.subscribe(self._on_selection_model_changed)
+        self.edit_state = TimelineEditState.from_dict(self.settings.timeline_ui)  # tool / ripple / snapping / linked selection / follow playhead; preferences persist in settings.json
+        self.edit_state.subscribe(self._on_edit_state_changed)
 
         self.bus.subscribe(Topics.PROJECT_CHANGED, self._on_project_changed)
 
@@ -169,8 +175,7 @@ class Workspace:
         command = payload.get("command")
         if command is None or getattr(command, "major", True):
             self.autosave.request(project)  # after major operations
-        if self.selected_clip_id and project.timeline.get_clip(self.selected_clip_id) is None:
-            self.select_clip(None)
+        self.selection.prune(project.timeline)  # clips that no longer exist leave the selection (ids that come back through undo / redo are not re-selected)
 
     def undo(self) -> None:
         self.commands.undo()
@@ -178,10 +183,45 @@ class Workspace:
     def redo(self) -> None:
         self.commands.redo()
 
+    # ------------------------------------------------------------ selection / editing preferences
+    @property
+    def selected_clip_id(self) -> str | None:
+        """The primary selected clip (the last one clicked) or None - what single-clip UI (inspector, split, delete button) acts on."""
+        return self.selection.primary
+
+    @selected_clip_id.setter
+    def selected_clip_id(self, clip_id: str | None) -> None:
+        self.select_clip(clip_id)
+
+    @property
+    def selected_clip_ids(self) -> list[str]:
+        return self.selection.ids
+
     def select_clip(self, clip_id: str | None) -> None:
-        if clip_id != self.selected_clip_id:
-            self.selected_clip_id = clip_id
-            self.bus.publish(Topics.SELECTION_CHANGED, clip_id=clip_id)
+        """Replace the selection by one clip (None clears it)."""
+        self.selection.select_clip(clip_id)
+
+    def set_selection(self, ids, mode: str = "replace", primary: str | None = None) -> None:
+        """Change the selection (``mode``: replace | toggle | add | remove). ``primary`` becomes the clip the inspector shows when it is selected."""
+        self.selection.select(ids, mode, primary=primary)
+
+    def _on_selection_model_changed(self, model: SelectionModel) -> None:
+        self.bus.publish(Topics.SELECTION_CHANGED, clip_id=model.primary, clip_ids=model.ids)
+
+    def _on_edit_state_changed(self, _state: TimelineEditState, changed: frozenset) -> None:
+        self.bus.publish(Topics.TIMELINE_EDIT_STATE_CHANGED, changed=sorted(changed))
+        if changed & set(EDIT_STATE_PERSISTED):
+            self._persist_edit_state()
+
+    def _persist_edit_state(self) -> None:
+        data = self.edit_state.to_dict()
+        if data == self.settings.timeline_ui:
+            return
+        self.settings = dc_replace(self.settings, timeline_ui=data)
+        try:
+            self.settings_store.save(self.settings)
+        except OSError:
+            _log.warning("Timeline editing preferences could not be saved", exc_info=True)
 
     # ------------------------------------------------------------ project lifecycle
     def new_project(
@@ -224,7 +264,7 @@ class Workspace:
             for job in self.jobs.active_jobs():
                 self.jobs.cancel(job.id)
         self.commands.clear()
-        self.select_clip(None)
+        self.selection.select_none()
 
     def save(self) -> None:
         project = self.require_project()

@@ -26,7 +26,8 @@ class Topics:
     PROJECT_CHANGED = "project.changed"  # payload: scope = script|assets|timeline|voice_over|meta
     DIRTY_CHANGED = "project.dirty_changed"
     COMMAND_STACK_CHANGED = "commands.changed"
-    SELECTION_CHANGED = "selection.changed"
+    SELECTION_CHANGED = "selection.changed"  # payload: clip_id = the primary clip (or None), clip_ids = every selected id in order
+    TIMELINE_EDIT_STATE_CHANGED = "timeline.edit_state_changed"  # payload: changed = sorted names of the TimelineEditState fields that changed
     JOB_ADDED = "job.added"
     JOB_UPDATED = "job.updated"
     THUMBNAIL_READY = "media.thumbnail_ready"
