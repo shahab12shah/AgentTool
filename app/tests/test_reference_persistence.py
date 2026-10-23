@@ -3,6 +3,8 @@ projects saved before Phase 7 (or without the reference sections) still open; a 
 
 from __future__ import annotations
 
+from app.core.constants import SCHEMA_VERSION
+
 import json
 import shutil
 from pathlib import Path
@@ -98,7 +100,7 @@ def test_a_project_saved_before_phase_7_opens_and_stays_usable(applied_ws, proje
     for k in ("qc_settings", "qc_runs", "qc_issues", "qc_scores", "qc_ignored_issues", "qc_fixes", "qc_history", "qc_cache", "render_qc_results"):
         old.pop(k, None)
     q = Project.from_document(old)
-    assert q.schema_version == 8 and q.reference_assets == {} and q.reference_style_profile is None and q.reference_style_overrides.is_empty
+    assert q.schema_version == SCHEMA_VERSION and q.reference_assets == {} and q.reference_style_profile is None and q.reference_style_overrides.is_empty
     assert not q.reference_settings.enabled and q.style_application_history == [] and q.reference_analysis == {}
     # the same through the file on disk
     root = ws.project.root

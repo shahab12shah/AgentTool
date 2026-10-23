@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.core.constants import SCHEMA_VERSION
+
 import json
 import os
 import time
@@ -413,7 +415,7 @@ def test_render_settings_and_history_survive_save_and_reopen(demo_ws):
     assert (s.resolution, s.fps, s.quality, s.crf, s.audio_bitrate_kbps, s.hardware_acceleration) == ("720p", 24, "custom", 21, 160, "cpu")
     rec = ws.render.history()[-1]
     assert rec.render_id == job.id and rec.status == "COMPLETED" and rec.settings["fps"] == 24 and rec.output_path and rec.timeline_hash == job.record.timeline_hash
-    assert p.schema_version == 8 and "render_history" in p.to_document() and "proxies" in p.to_document()
+    assert p.schema_version == SCHEMA_VERSION and "render_history" in p.to_document() and "proxies" in p.to_document()
     info = ws.render.engine.probe.probe(Path(rec.output_path))
     assert (info.width, info.height, info.fps) == (1280, 720, 24.0) and info.codec == "h264"
 
@@ -427,7 +429,7 @@ def test_a_version_5_project_opens_and_gets_render_sections(demo_ws):
         doc.pop(k)
     doc["render_settings"] = {"container": "mp4", "video_codec": "h264", "audio_codec": "aac", "crf": 18}
     p = Project.from_document(doc)
-    assert p.schema_version == 8 and p.render_history == [] and p.proxies == {} and p.render_settings.quality == "custom" and p.render_settings.crf == 18
+    assert p.schema_version == SCHEMA_VERSION and p.render_history == [] and p.proxies == {} and p.render_settings.quality == "custom" and p.render_settings.crf == 18
 
 
 def test_recovery_checkpoint_and_autosave_happen_before_a_render(demo_ws):
@@ -436,7 +438,7 @@ def test_recovery_checkpoint_and_autosave_happen_before_a_render(demo_ws):
     job = wait_job(ws.render.start_export())
     assert job.status is RenderStatus.COMPLETED
     cps = list((ws.paths.data_dir / "checkpoints" / ws.project.project_id).glob("before_render_*.json"))
-    assert cps and json.loads(cps[-1].read_text())["schema_version"] == 8
+    assert cps and json.loads(cps[-1].read_text())["schema_version"] == SCHEMA_VERSION
     assert ws.autosave.wait_idle(10)
 
 
