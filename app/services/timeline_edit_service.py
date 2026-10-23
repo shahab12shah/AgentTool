@@ -27,6 +27,7 @@ from app.timeline import ops_ripple as orp
 from app.timeline.clipboard import ClipboardData, copy_attributes, plan_paste, plan_paste_attributes
 from app.timeline.clip import Clip
 from app.timeline.markers import Marker
+from app.timeline.ops_arrange import plan_align, plan_distribute
 from app.timeline.ops_common import relatives
 from app.timeline.ops_text import plan_merge_captions
 from app.timeline.plan import EditPlan, PlanCommand, PlanEnv, validate_plan
@@ -222,6 +223,45 @@ class TimelineEditService:
     def merge_captions(self, ids: Iterable[str] | None = None) -> EditPlan | None:
         ids = self._ids(ids)
         return self.run(plan_merge_captions(self.env(), ids), own=ids)
+
+    # ------------------------------------------------------------------ align / distribute
+    def _boundary_times(self, source: str) -> list[float]:
+        project = self._project()
+        if source == "scene":
+            times = sorted({t for s in project.scenes for t in (s.start, s.end)})
+            what = "There are no scenes yet, so there are no scene boundaries to align to."
+        else:
+            times = [m.time for m in self.timeline.markers]
+            what = "There are no markers on the timeline. Add one first (M)."
+        if not times:
+            raise TimelineError(what)
+        return times
+
+    def align(self, ids: Iterable[str] | None = None, mode: str = "start", to: Any = "playhead") -> EditPlan | None:
+        """Align the selection. ``mode``: start | end | center (to ``to``), first_start | last_end (to the selection itself). ``to``: ``"playhead"``, ``"scene"`` (each clip to the nearest scene
+        boundary), ``"marker"`` (each clip to the nearest marker) or a time in seconds."""
+        ids = self._ids(ids)
+        linked = self.state.linked_selection
+        target: Any = None
+        if mode in ("start", "end", "center"):
+            tl = self.timeline
+            if to == "playhead":
+                target = self.playhead
+            elif to in ("scene", "marker"):
+                times = self._boundary_times(to)
+                edge = {"start": lambda c: c.timeline_start, "end": lambda c: c.timeline_end, "center": lambda c: c.timeline_start + c.duration / 2}[mode]
+                target = {}
+                for i in ids:
+                    here = edge(tl.find_clip(i)[1])
+                    target[i] = min(times, key=lambda t: abs(t - here))
+            else:
+                target = float(to)
+        return self.run(plan_align(self.env(), ids, mode, target, linked=linked, grouped=linked), own=ids)
+
+    def distribute(self, ids: Iterable[str] | None = None, mode: str = "gaps") -> EditPlan | None:
+        ids = self._ids(ids)
+        linked = self.state.linked_selection
+        return self.run(plan_distribute(self.env(), ids, mode, linked=linked, grouped=linked), own=ids)
 
     # ------------------------------------------------------------------ media placement
     def clips_for_assets(self, asset_ids: Iterable[str], track: Track, start: float) -> list[Clip]:

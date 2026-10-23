@@ -216,6 +216,49 @@ def test_ripple_delete_closes_the_gap_and_undo_restores_everything(ews):
     assert tl.get_clip(c).timeline_start == pytest.approx(10.0)  # without ripple a gap stays
 
 
+# ------------------------------------------------------------------------------------------------------------------------ align / distribute
+def test_align_to_playhead_scene_boundary_and_marker_in_one_undo_step_each(ews):
+    from app.analysis.models import Scene
+
+    a, b, c = lay(ews)
+    tl = ews.project.timeline
+    # put b and c on a second video track so they can be aligned with a
+    v2, v3 = ews.edit.add_track(TrackKind.VIDEO), ews.edit.add_track(TrackKind.VIDEO)
+    ews.edit.move_clips([b], 0.0, {b: v2.id})
+    ews.edit.move_clips([c], 0.0, {c: v3.id})
+    ews.project.scenes = [Scene("s1", "1", 0.0, 5.7), Scene("s2", "2", 5.7, 12.0)]
+    ews.edit.set_playhead(8.0)
+    ews.edit.align([b], "start", "playhead")
+    assert tl.get_clip(b).timeline_start == pytest.approx(8.0)
+    ews.commands.undo()
+    assert tl.get_clip(b).timeline_start == pytest.approx(6.0)
+    ews.edit.align([b], "start", "scene")  # b starts at 6.0: the nearest scene boundary is 5.7
+    assert tl.get_clip(b).timeline_start == pytest.approx(5.7, abs=1 / 30 / 2 + 1e-6)
+    ews.commands.undo()
+    m = ews.edit.add_marker(7.0, "sync")
+    ews.edit.align([b], "end", "marker")  # b ends at 10.0; the marker at 7.0 is the only one
+    assert tl.get_clip(b).timeline_end == pytest.approx(7.0, abs=1 / 30)
+    assert ews.project.timeline.get_marker(m)
+    with pytest.raises(TimelineError, match="no scenes"):
+        ews.project.scenes = []
+        ews.edit.align([b], "start", "scene")
+
+
+def test_distribute_through_the_facade(ews):
+    a, b, c = lay(ews)
+    v2 = ews.edit.add_track(TrackKind.VIDEO)
+    v3 = ews.edit.add_track(TrackKind.VIDEO)
+    ews.edit.move_clips([b], 0.0, {b: v2.id})
+    ews.edit.move_clips([c], 4.0, {c: v3.id})
+    tl = ews.project.timeline
+    ews.edit.distribute([a, b, c], "gaps")
+    ga = tl.get_clip(b).timeline_start - tl.get_clip(a).timeline_end
+    gb = tl.get_clip(c).timeline_start - tl.get_clip(b).timeline_end
+    assert abs(ga - gb) <= 1 / 30 + 1e-6
+    ews.commands.undo()
+    assert tl.get_clip(b).timeline_start == pytest.approx(6.0)
+
+
 # ------------------------------------------------------------------------------------------------------------------------ clipboard
 def test_copy_paste_makes_new_ids_and_reuses_the_asset(ews):
     a, *_ = lay(ews, 1)
