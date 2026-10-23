@@ -240,6 +240,25 @@ def test_a_committed_edit_autosaves_but_a_drag_preview_does_not_touch_the_projec
     assert ws.commands.undo_text.lower().startswith("move")
 
 
+def test_a_burst_of_edits_does_not_reserialise_the_project_each_time_but_the_first_edit_always_autosaves(cut_ws):
+    ws = cut_ws
+    ws.save()
+    settle(ws)
+    ws.edit.state.update(linked_selection=False)
+    cid = ws.project.timeline.get_track(track(ws).id).clips[0].id
+    ws.autosave._cost = 10.0  # pretend serialising this project is slow (0.2 s would already be): the next snapshot has to wait
+    ws.edit.move_clips([cid], 0.5)
+    settle(ws)
+    assert len(ws.pending_recovery()) == 1  # the first edit after a save is snapshotted
+    skipped = ws.autosave.throttled
+    for _ in range(5):
+        ws.edit.move_clips([cid], 0.1)
+    settle(ws)
+    assert ws.autosave.throttled == skipped + 5  # the burst was coalesced ...
+    assert ws.autosave_tick()  # ... and the periodic tick (never throttled) writes the latest state
+    settle(ws)
+
+
 def test_change_tracker_marks_only_what_an_edit_touched(cut_ws):
     ws = cut_ws
     ws.project.scenes = [Scene("s1", "1", 0.0, 1.0), Scene("s2", "2", 1.0, 2.0), Scene("s3", "3", 2.0, 3.0)]

@@ -177,7 +177,7 @@ class Workspace:
         self.projects.set_dirty(True)
         command = payload.get("command")
         if command is None or getattr(command, "major", True):
-            self.autosave.request(project)  # after major operations
+            self.autosave.request(project, throttle=True)  # after major operations (throttled: a burst of edits does not re-serialise a big project each time)
         self.selection.prune(project.timeline)  # clips that no longer exist leave the selection (ids that come back through undo / redo are not re-selected)
 
     def undo(self) -> None:
