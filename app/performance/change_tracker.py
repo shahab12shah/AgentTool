@@ -541,6 +541,21 @@ def _h_state_install(t: ProjectChangeTracker, c: Any) -> _Effect:
     return e
 
 
+def _h_plan(t: ProjectChangeTracker, c: Any) -> _Effect:
+    """PlanCommand (Phase 10 edits): exactly the clips it changed, before and after (a moved clip dirties both its old and new place)."""
+    before, after = c.states()
+    changed = [*before, *after]
+    if not changed:
+        return t._broad("timeline", unknown=True)
+    e = t._clips_effect(changed)
+    e.domains.add(D_TIMELINE)
+    if any(cl.kind == "caption" for cl in changed):
+        e.domains.add(D_CAPTIONS)
+    if any(cl.audio or (cl.asset_id and False) for cl in changed) or any(k.property == "volume" for cl in changed for k in cl.keyframes):
+        e.domains.add(D_AUDIO)
+    return e
+
+
 def _h_clip_flag(t: ProjectChangeTracker, c: Any) -> _Effect:  # ownership marks: the clip's scene
     clip = t._project().timeline.get_clip(c.clip_id) if t._project() is not None else None
     if clip is not None:
@@ -629,7 +644,7 @@ _SCOPE_NO_EFFECT = frozenset({"qc", "performance", "waveform", "proxies_ui"})
 _HANDLERS: dict[str, Callable[[ProjectChangeTracker, Any], _Effect]] = {
     "AddTrackCommand": _h_track, "RemoveTrackCommand": _h_track, "RenameTrackCommand": _h_track_rename, "SetTrackFlagCommand": _h_track, "SetTrackVolumeCommand": _h_track,
     "AddClipCommand": _h_add_clip, "DeleteClipCommand": _h_add_clip, "MoveClipCommand": _h_add_clip, "TrimClipCommand": _h_add_clip, "SetClipPropertiesCommand": _h_add_clip,
-    "SplitClipCommand": _h_add_clip,
+    "SplitClipCommand": _h_add_clip, "PlanCommand": _h_plan,
     "ApplyEditCommand": _h_state_install, "ApplyPresentationCommand": _h_state_install,
     "SetEditingSettingsCommand": _h_editing_settings, "SetSettingCommand": _h_set_setting,
     "MarkUserEditCommand": _h_clip_flag, "RecordUserDeleteCommand": _h_clip_flag, "MarkPresentationEditCommand": _h_clip_flag, "RecordPresentationDeleteCommand": _h_clip_flag,
