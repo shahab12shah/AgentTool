@@ -25,7 +25,7 @@ from app.timeline.ops_basic import (
     remap_ids,
 )
 from app.timeline.ops_common import new_group_id, new_link_id, relatives
-from app.timeline.plan import EditPlan, PlanEnv, clip_fits_track, validate_plan
+from app.timeline.plan import planner, EditPlan, PlanEnv, clip_fits_track, validate_plan
 from app.timeline.timeline import Timeline
 from app.timeline.track import TrackKind
 
@@ -120,6 +120,7 @@ def _shifted_start(env: PlanEnv, base: float, offset: float, grid: Grid) -> floa
     return base + offset
 
 
+@planner
 def plan_paste(env: PlanEnv, data: ClipboardData, at: float, *, target_track_id: str | None = None, policy: str = "reject") -> EditPlan:
     """Paste ``data`` so that its earliest clip starts at ``at`` (frame grid; sample grid if every target is an audio track).
 
@@ -198,6 +199,7 @@ def copy_attributes(clip: Clip) -> dict[str, Any]:
     }
 
 
+@planner
 def plan_paste_attributes(env: PlanEnv, ids: list[str], attrs: dict[str, Any]) -> EditPlan:
     """Apply copied attributes to clips. Audio-track clips only take the audio part; stills and text take no audio; the target's own crop / focus region is kept; fades are scaled
     down (noted) when together they would be longer than the target clip. Clips that would not change are left out."""

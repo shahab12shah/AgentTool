@@ -14,6 +14,7 @@ a multi-clip move, a ripple delete over a thousand clips and a roll edit are eac
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
@@ -21,6 +22,7 @@ from typing import Callable, Iterable
 from app.core.commands import Command
 from app.core.constants import MIN_CLIP_DURATION, TIME_EPSILON
 from app.core.exceptions import TimelineError
+from app.timeline.index import quiet
 from app.timeline.clip import KIND_CAPTION, KIND_GRAPHIC, KIND_MEDIA, KIND_TEXT, Clip
 from app.timeline.timebase import Timebase
 from app.timeline.timeline import Timeline
@@ -28,6 +30,17 @@ from app.timeline.track import Track, TrackKind
 
 SPEED_RANGE = (0.1, 8.0)
 SRC_TOL = 1e-3  # seconds of slack on source-range consistency (float round trips through frame arithmetic)
+
+
+def planner(fn: Callable) -> Callable:
+    """Mark a pure planner: while it runs, edits to its (not yet applied) clip copies do not bump the timeline's mutation epoch (see ``index.quiet``)."""
+
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        with quiet():
+            return fn(*args, **kwargs)
+
+    return run
 
 
 # ------------------------------------------------------------------------------------------------------------------------ environment

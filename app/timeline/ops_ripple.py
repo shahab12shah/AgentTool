@@ -42,7 +42,7 @@ from app.timeline.ops_basic import (  # the cut / lock rules live in ops_basic; 
     Grid, _cut_clip, _lock_problem, _make_piece, _r, _source_info, _word_index, sync_text_timing,
 )
 from app.timeline.ops_common import link_members, new_link_id, quantize_delta, relatives
-from app.timeline.plan import EditPlan, PlanEnv, changed_aspects
+from app.timeline.plan import planner, EditPlan, PlanEnv, changed_aspects
 from app.timeline.timeline import Timeline, new_clip_id
 from app.timeline.track import Track, TrackKind
 
@@ -371,6 +371,7 @@ class _Run:
 
 
 # ------------------------------------------------------------------------------------------------------------------------ ripple delete
+@planner
 def plan_ripple_delete(env: PlanEnv, ids: list[str], *, scope: str = "track", selected_track_ids: Iterable[str] | None = None, linked: bool = True, grouped: bool = True,
                        close_gap: bool = True) -> EditPlan:
     """Delete clips (plus linked / grouped relatives) and close the time they occupied.
@@ -481,6 +482,7 @@ def _apply_edge(env: PlanEnv, clip: Clip, edge: str, t: float, *, who: str = "")
 
 
 # ------------------------------------------------------------------------------------------------------------------------ ripple trim
+@planner
 def plan_ripple_trim(env: PlanEnv, clip_id: str, edge: str, new_time: float, *, scope: str = "track", selected_track_ids: Iterable[str] | None = None,
                      linked: bool = True, grouped: bool = True) -> EditPlan:
     """Trim one edge of a clip to a timeline time and move everything after the edit by the duration change.
@@ -552,6 +554,7 @@ def plan_ripple_trim(env: PlanEnv, clip_id: str, edge: str, new_time: float, *, 
 
 
 # ------------------------------------------------------------------------------------------------------------------------ ripple insert
+@planner
 def plan_ripple_insert(env: PlanEnv, clips: list[Clip], at: float, track_id: str, *, scope: str = "track", selected_track_ids: Iterable[str] | None = None,
                        linked: bool = True, grouped: bool = True) -> EditPlan:
     """Insert ``clips`` at ``at`` and shift everything at / after ``at`` in scope right by the inserted span.
@@ -601,6 +604,7 @@ def plan_ripple_insert(env: PlanEnv, clips: list[Clip], at: float, track_id: str
 
 
 # ------------------------------------------------------------------------------------------------------------------------ ripple move
+@planner
 def plan_ripple_move(env: PlanEnv, ids: list[str], delta: float, *, scope: str = "track", selected_track_ids: Iterable[str] | None = None, linked: bool = True,
                      grouped: bool = True) -> EditPlan:
     """Move clips along their own track with ripple: the gap they leave closes and room opens where they land.
@@ -675,6 +679,7 @@ def roll_limits(env: PlanEnv, left_id: str, right_id: str) -> tuple[float, float
     return max(llo, rlo), min(lhi, rhi)
 
 
+@planner
 def plan_roll(env: PlanEnv, left_id: str, right_id: str, new_boundary_time: float, *, linked: bool = True) -> EditPlan:
     """Move the cut between two ADJACENT clips of one track: the left clip's end / ``source_out`` and the right clip's start / ``source_in`` / duration change together, so the
     combined duration is unchanged (spec: a 10 s cut rolled to 9.5 s keeps the total length). Rejected, with the reason, when the clips are not adjacent (within a frame), when the
@@ -731,6 +736,7 @@ def slip_limits(env: PlanEnv, clip_id: str) -> tuple[float, float]:
     return 0.0 - clip.source_in, (_INF if total is None else max(total - clip.source_out, 0.0))
 
 
+@planner
 def plan_slip(env: PlanEnv, clip_id: str, delta_source: float, *, linked: bool = True) -> EditPlan:
     """Slip the content: ``source_in`` and ``source_out`` both move by ``delta_source`` (source seconds; whole frames on picture clips, samples on audio) while the clip's timeline
     position, duration and speed stay. Bounded by 0 and the media length: a larger slip is rejected with the allowed range. Keyframes are clip-local and untouched. Linked media
@@ -800,6 +806,7 @@ def slide_limits(env: PlanEnv, clip_id: str) -> tuple[float, float]:
     return lo, hi
 
 
+@planner
 def plan_slide(env: PlanEnv, clip_id: str, delta: float, *, linked: bool = True) -> EditPlan:
     """Slide a clip along its track by ``delta`` (whole frames, or samples on audio) while its neighbours absorb the move: the previous clip's end and the next clip's start move
     with it (end trim / head trim with ``source_in`` advance), the slid clip's own source range and duration are unchanged. Both neighbours must touch the clip (within a frame) or be

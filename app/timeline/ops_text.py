@@ -7,11 +7,12 @@ import copy
 from app.core.exceptions import TimelineError
 from app.timeline.clip import KIND_CAPTION
 from app.timeline.ops_basic import sync_text_timing
-from app.timeline.plan import EditPlan, PlanEnv
+from app.timeline.plan import planner, EditPlan, PlanEnv
 
 MAX_MERGE_GAP = 1.5  # seconds: captions further apart than this are not "one sentence on screen"
 
 
+@planner
 def plan_merge_captions(env: PlanEnv, ids: list[str]) -> EditPlan:
     """Merge caption clips on ONE track into the first one. They must be neighbours on the track (no other clip between them), carry word timing, and be less than 1.5 s apart.
 

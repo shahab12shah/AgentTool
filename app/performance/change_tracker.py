@@ -560,7 +560,15 @@ def _h_plan(t: ProjectChangeTracker, c: Any) -> _Effect:
     e.domains.add(D_TIMELINE)
     if any(cl.kind == "caption" for cl in changed):
         e.domains.add(D_CAPTIONS)
-    if any(cl.audio or (cl.asset_id and False) for cl in changed) or any(k.property == "volume" for cl in changed for k in cl.keyframes):
+    project = t._project()
+
+    def on_audio_track(cl) -> bool:
+        try:
+            return project.timeline.get_track(cl.track_id).is_audio
+        except Exception:  # noqa: BLE001  (the track is gone: treat as audio-relevant, never narrower than the truth)
+            return True
+
+    if any(cl.audio or on_audio_track(cl) for cl in changed) or any(k.property == "volume" for cl in changed for k in cl.keyframes):
         e.domains.add(D_AUDIO)
     return e
 

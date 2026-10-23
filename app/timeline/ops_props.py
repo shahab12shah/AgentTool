@@ -27,7 +27,7 @@ from app.core.exceptions import TimelineError
 from app.timeline.clip import KIND_MEDIA, LOCK_KINDS, Clip
 from app.timeline.keyframes import INTERPOLATIONS, PROPERTIES, Keyframe, window_keyframes
 from app.timeline.ops_common import group_members, link_members, new_group_id, new_link_id
-from app.timeline.plan import SPEED_RANGE, EditPlan, PlanEnv
+from app.timeline.plan import planner, SPEED_RANGE, EditPlan, PlanEnv
 from app.timeline.track import Track, TrackKind
 
 # ------------------------------------------------------------------------------------------------------------------------ ranges
@@ -143,6 +143,7 @@ def _wrong_category(key: str, category: str, name: str) -> str:
     return f"“{key}” cannot be changed on this kind of clip. Available: {', '.join(_ALLOWED.get(category, ())) or 'nothing'}."
 
 
+@planner
 def plan_update_clip(env: PlanEnv, clip_id: str, **changes: Any) -> EditPlan:
     """Change several properties of ONE clip as one undo step. Only whitelisted properties that the renderer reads are accepted (see the module docstring); values are
     validated, never clamped. Picture clips: position (x, y px), scale, rotation, opacity, crop ((x, y, w, h) fractions or None), fit. Audio clips: volume, muted, fade_in,
@@ -398,6 +399,7 @@ def _respeed(env: PlanEnv, clip: Clip, s: float, notes: list[str]) -> Clip:
     return new
 
 
+@planner
 def plan_set_speed(env: PlanEnv, clip_id: str, speed: float, *, linked: bool = True, link_policy: str | None = None) -> EditPlan:
     """Change a clip's playback speed (``SPEED_RANGE``, never reverse). The source range stays; the duration becomes (source_out - source_in) / speed, limited by the next clip.
 
@@ -466,6 +468,7 @@ def dissolve_source(env: PlanEnv, clip: Clip) -> Clip | None:
     return best if info is not None and info[0] in ("video", "image") else None
 
 
+@planner
 def plan_set_transition(env: PlanEnv, clip_id: str, type: str | None, duration: float | None = None, params: dict | None = None) -> EditPlan:
     """Set the transition INTO a picture clip: ``FADE`` | ``DISSOLVE`` | ``WIPE`` | ``SLIDE`` (``CUT`` / ``None`` remove it). ``duration`` (seconds, > 0, at most the clip length)
     is required for the visible types. A DISSOLVE needs a picture that ends where this clip starts (the renderer holds its last frame); otherwise the request is rejected rather
@@ -506,6 +509,7 @@ def plan_set_transition(env: PlanEnv, clip_id: str, type: str | None, duration: 
     return EditPlan(f"Set {kind.lower()} transition", {clip_id: new}, notes=notes)
 
 
+@planner
 def plan_remove_transition(env: PlanEnv, clip_id: str) -> EditPlan:
     _track, clip = _require_picture(env, clip_id)
     if clip.transition is None:
@@ -589,6 +593,7 @@ def _kf_assert_unique(kfs: Iterable[Keyframe]) -> None:
                 raise TimelineError(f"There would be two {_PROP_NAME.get(prop, prop)} keyframes at {a:.2f} s. Move or delete one of them first.")
 
 
+@planner
 def plan_add_keyframe(env: PlanEnv, clip_id: str, prop: str, time: float, value: float, interpolation: str = "linear") -> EditPlan:
     """Add one keyframe (clip-local ``time`` in 0..duration). Rejected when the property already has a keyframe at that time."""
     _track, clip, props = _kf_target(env, clip_id)
@@ -603,6 +608,7 @@ def plan_add_keyframe(env: PlanEnv, clip_id: str, prop: str, time: float, value:
     return EditPlan("Add keyframe", {clip_id: new}, major=False)
 
 
+@planner
 def plan_delete_keyframes(env: PlanEnv, clip_id: str, selection: Iterable[tuple[str, float]]) -> EditPlan:
     """Delete the keyframes selected by (property, time)."""
     _track, clip, _props = _kf_target(env, clip_id)
@@ -618,6 +624,7 @@ def plan_delete_keyframes(env: PlanEnv, clip_id: str, selection: Iterable[tuple[
     return EditPlan("Delete keyframe" if len(doomed) == 1 else f"Delete {len(doomed)} keyframes", {clip_id: new}, major=False)
 
 
+@planner
 def plan_move_keyframes(env: PlanEnv, clip_id: str, moves: Iterable[Sequence[Any]]) -> EditPlan:
     """Move / re-value several keyframes at once: ``moves`` = (property, old_time, new_time, new_value | None). The RESULT is checked, so keyframes can swap places in one edit,
     but two keyframes of one property may never end up at the same time. An edited keyframe stops belonging to an AI decision (manual override)."""
@@ -651,6 +658,7 @@ def plan_move_keyframes(env: PlanEnv, clip_id: str, moves: Iterable[Sequence[Any
     return EditPlan("Move keyframe" if len(picked) == 1 else f"Move {len(picked)} keyframes", {clip_id: new}, major=False)
 
 
+@planner
 def plan_set_keyframe_interpolation(env: PlanEnv, clip_id: str, selection: Iterable[tuple[str, float]], interp: str) -> EditPlan:
     """Set how the value travels from each selected keyframe to the next (``keyframes.INTERPOLATIONS``)."""
     _track, clip, _props = _kf_target(env, clip_id)
@@ -671,6 +679,7 @@ def plan_set_keyframe_interpolation(env: PlanEnv, clip_id: str, selection: Itera
     return EditPlan("Change keyframe interpolation", {clip_id: new}, major=False)
 
 
+@planner
 def plan_copy_keyframes(clip: Clip, selection: Iterable[tuple[str, float]] | None = None) -> list[Keyframe]:
     """Copies of the selected keyframes (all of them when ``selection`` is None), sorted, owned by the user. Pure: nothing changes; paste with ``plan_paste_keyframes``."""
     if selection is None:
@@ -684,6 +693,7 @@ def plan_copy_keyframes(clip: Clip, selection: Iterable[tuple[str, float]] | Non
     return _kf_sorted(Keyframe(k.property, k.time, k.value, k.interpolation, "") for k in picked)
 
 
+@planner
 def plan_paste_keyframes(env: PlanEnv, clip_id: str, keyframes: Iterable[Keyframe | dict], at_time: float) -> EditPlan:
     """Paste copied keyframes so the earliest lands at ``at_time`` (clip-local), keeping their spacing. Properties the target cannot animate are skipped with a note (rejected when
     none fit); a paste that would run past the end of the clip, or land on an existing keyframe of the same property, is rejected."""
@@ -763,26 +773,31 @@ def _release(env: PlanEnv, ids: Iterable[str], attr: str, members, include_mates
     return EditPlan(f"{verb.capitalize()} {_plural(len(updates), 'clip')}", updates)
 
 
+@planner
 def plan_link(env: PlanEnv, ids: Iterable[str], *, link_id: str | None = None) -> EditPlan:
     """Link two or more clips (a picture and its production audio): they then follow each other's move / trim / split / delete / ripple. Clips already linked to a selected clip
     join the new link. Clips on locked tracks are rejected. ``link_id`` is optional (tests / callers that need a stable id)."""
     return _relate(env, ids, "link_id", new_link_id, link_id, "link", "link")
 
 
+@planner
 def plan_unlink(env: PlanEnv, ids: Iterable[str], *, include_mates: bool = False) -> EditPlan:
     """Remove the link from the given clips (and from every other member of their links when ``include_mates``). Members left alone keep their id (a link of one is harmless)."""
     return _release(env, ids, "link_id", link_members, include_mates, "link", "unlink")
 
 
+@planner
 def plan_group(env: PlanEnv, ids: Iterable[str], *, group_id: str | None = None) -> EditPlan:
     """Group two or more clips: they are selected and moved together, but trimmed and split independently."""
     return _relate(env, ids, "group_id", new_group_id, group_id, "group", "group")
 
 
+@planner
 def plan_ungroup(env: PlanEnv, ids: Iterable[str], *, include_mates: bool = False) -> EditPlan:
     return _release(env, ids, "group_id", group_members, include_mates, "group", "ungroup")
 
 
+@planner
 def plan_set_locks(env: PlanEnv, ids: Iterable[str], locks: Iterable[str] | str, mode: str = "set") -> EditPlan:
     """Edit the user locks (``LOCK_KINDS``) of clips: ``set`` replaces them, ``add`` / ``remove`` change the given kinds only. Works on clips that are already locked (changing a
     lock is not a locked aspect); a locked TRACK still has to be unlocked first."""

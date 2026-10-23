@@ -38,7 +38,7 @@ from app.timeline.clip import (
 )
 from app.timeline.keyframes import window_keyframes
 from app.timeline.ops_common import new_group_id, new_link_id, quantize_delta, relatives
-from app.timeline.plan import EditPlan, PlanEnv, clip_fits_track, validate_plan
+from app.timeline.plan import planner, EditPlan, PlanEnv, clip_fits_track, validate_plan
 from app.timeline.timeline import new_clip_id
 from app.timeline.timeline_commands import split_keyframes
 from app.timeline.track import TrackKind
@@ -336,6 +336,7 @@ def _move_plan(env: PlanEnv, clips: list[Clip], d: float, dest: dict[str, str], 
     return EditPlan(description, updates=updates, notes=notes)
 
 
+@planner
 def plan_move(env: PlanEnv, ids: list[str], delta: float, *, track_moves: dict[str, str] | None = None, linked: bool = True, grouped: bool = True,
               clamp_at_zero: bool = False, description: str = "Move clips") -> EditPlan:
     """Move every clip (plus linked / grouped relatives) by the SAME delta, optionally onto other tracks (``track_moves``: clip id -> destination track id).
@@ -363,6 +364,7 @@ def plan_move(env: PlanEnv, ids: list[str], delta: float, *, track_moves: dict[s
     return _move_plan(env, clips, d, dest, description, clamp_at_zero=clamp_at_zero, audio_only=audio_only)
 
 
+@planner
 def plan_set_start(env: PlanEnv, clip_id: str, new_start: float, *, linked: bool = True, grouped: bool = False) -> EditPlan:
     """Numeric edit of a clip's timeline start (the inspector). The start snaps to the frame (or sample) grid; linked clips follow by the same amount.
     Moving never changes the source range or the duration."""
@@ -432,6 +434,7 @@ def _with_edge(env: PlanEnv, clip: Clip, edge: str, t: float) -> Clip:
     return c
 
 
+@planner
 def plan_trim(env: PlanEnv, clip_id: str, edge: str, new_time: float, *, linked: bool = True, snap: bool = True, description: str | None = None) -> EditPlan:
     """Trim one edge of a clip to a TIMELINE time.
 
@@ -484,6 +487,7 @@ def plan_trim(env: PlanEnv, clip_id: str, edge: str, new_time: float, *, linked:
     return EditPlan(desc, updates=updates, notes=notes)
 
 
+@planner
 def plan_set_duration(env: PlanEnv, clip_id: str, duration: float, *, linked: bool = True) -> EditPlan:
     """Numeric duration (the inspector): moves the END edge. ``source_out`` follows (``source_in + duration * speed``); the duration is limited by the source media and the next clip
     (clamped, with a note) and by the minimum clip length."""
@@ -494,6 +498,7 @@ def plan_set_duration(env: PlanEnv, clip_id: str, duration: float, *, linked: bo
     return plan_trim(env, clip_id, "end", clip.timeline_start + duration, linked=linked, snap=True, description="Set clip duration")
 
 
+@planner
 def plan_set_source_range(env: PlanEnv, clip_id: str, source_in: float | None = None, source_out: float | None = None) -> EditPlan:
     """Numeric edit of the SOURCE in / out points (source-media seconds). The timeline start stays; the duration becomes ``(source_out - source_in) / speed`` (rounded to the
     frame grid), so the END edge moves. Only this clip is changed (the source belongs to its own media). Out-of-range numbers are rejected; a range that runs past the end of the
@@ -572,6 +577,7 @@ def _split_one(env: PlanEnv, clip: Clip, cut: float, grid: Grid, notes: list[str
     return left, right
 
 
+@planner
 def plan_split(env: PlanEnv, ids: list[str], at: float, *, linked: bool = True, include_intersecting_on: list[str] | None = None, snap: bool = True) -> EditPlan:
     """Split clips at ONE timeline time.
 
@@ -630,6 +636,7 @@ def plan_split(env: PlanEnv, ids: list[str], at: float, *, linked: bool = True, 
 
 
 # ------------------------------------------------------------------------------------------------------------------------ delete / duplicate
+@planner
 def plan_delete(env: PlanEnv, ids: list[str], *, linked: bool = True, grouped: bool = True) -> EditPlan:
     """Remove clips plus linked / grouped relatives (no ripple: the gap stays)."""
     tl = env.timeline
@@ -660,6 +667,7 @@ def _place_copies(env: PlanEnv, src: list[Clip], shift_start: float, tracks: dic
     return plan
 
 
+@planner
 def plan_duplicate(env: PlanEnv, ids: list[str], *, offset: float | None = None, to_start: float | None = None, target_tracks: dict[str, str] | None = None,
                    linked: bool = True, grouped: bool = True) -> EditPlan:
     """Independent copies of the clips (plus linked / grouped relatives): fresh ids, USER-owned, no AI decision, no locks, link / group ids remapped to fresh ids, ``scene_id`` kept,
@@ -707,6 +715,7 @@ def _subtract(s: float, e: float, ivs: list[tuple[float, float]]) -> list[tuple[
     return out
 
 
+@planner
 def plan_overwrite(env: PlanEnv, new_clips: list[Clip], *, description: str = "Overwrite") -> EditPlan:
     """Place ``new_clips`` (positions and tracks already set) over whatever is there: existing clips on the same track that they overlap are trimmed (start trim advances
     ``source_in``), split in two (when a new clip lies inside) or removed (when fully covered). Leftovers shorter than the minimum clip length are removed with a note. A locked
@@ -775,6 +784,7 @@ def plan_overwrite(env: PlanEnv, new_clips: list[Clip], *, description: str = "O
 
 
 # ------------------------------------------------------------------------------------------------------------------------ replace
+@planner
 def plan_replace(env: PlanEnv, clip_id: str, new_asset_id: str, *, keep_duration: bool = True) -> EditPlan:
     """Swap the media of a clip, keeping its place, track, transform, effects, animation, keyframes, audio settings and transition.
 
@@ -838,6 +848,7 @@ def plan_replace(env: PlanEnv, clip_id: str, new_asset_id: str, *, keep_duration
 
 
 # ------------------------------------------------------------------------------------------------------------------------ free insert
+@planner
 def plan_insert_free(env: PlanEnv, clips: list[Clip], at: float, track_id: str) -> EditPlan:
     """Non-ripple placement for media dropped from the library: the clips go onto ``track_id`` one after another, each at the first free start from ``at`` (frame/sample grid)."""
     tl = env.timeline

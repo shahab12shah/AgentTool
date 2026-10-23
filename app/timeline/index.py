@@ -9,7 +9,9 @@ index can only ever be slower than a scan, never wrong.
 from __future__ import annotations
 
 import math
+import threading
 from bisect import bisect_left, bisect_right
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Iterable
 
 from app.core.constants import TIME_EPSILON
@@ -22,8 +24,24 @@ _EPOCH = [0]
 CLIP_WATCHED = frozenset({"id", "track_id", "asset_id", "timeline_start", "duration"})
 
 
+_QUIET = threading.local()
+
+
 def bump() -> None:
+    if getattr(_QUIET, "depth", 0):
+        return  # planning in this thread (see ``quiet``)
     _EPOCH[0] += 1
+
+
+@contextmanager
+def quiet():
+    """Planning builds NEW clip objects and edits them before they exist in any track. That must not invalidate the live indexes and snap caches: a drag asks for a
+    fresh plan on every mouse move. Only the calling thread is silenced; a planner never mutates live data, and the index re-checks every answer against the live clip anyway."""
+    _QUIET.depth = getattr(_QUIET, "depth", 0) + 1
+    try:
+        yield
+    finally:
+        _QUIET.depth -= 1
 
 
 def epoch() -> int:
