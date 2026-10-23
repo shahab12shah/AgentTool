@@ -22,9 +22,8 @@ from app.timeline.clip import Clip
 from app.ui.context import UiContext
 from app.ui.media_library import ASSET_MIME
 from app.ui.theme import palette
+from app.ui.timeline_layout import DEFAULT_ROW_H as ROW_H, RULER_H, TrackLayout
 
-ROW_H = 36
-RULER_H = 28
 EDGE_PX = 7
 SNAP_PX = 8
 MIN_PPS, MAX_PPS = 5.0, 600.0
@@ -76,6 +75,8 @@ class TimelineCanvas(QWidget):
         self._elide_cache: dict[tuple, str] = {}
         self._qcolors: dict[tuple, QColor] = {}
         self._snap_cache: tuple[tuple, _SnapList] | None = None
+        self.track_layout = TrackLayout()  # row positions / heights (shared with the header column); rebuilt in reload()
+        ctx.bridge.on("timeline.playhead", lambda payload: self._sync_playhead(payload.get("time", 0.0)))  # someone else (a shortcut, the panel) moved the playhead
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -94,26 +95,27 @@ class TimelineCanvas(QWidget):
         return max(0.0, x / self.pps)
 
     def track_index_at(self, y: float) -> int | None:
-        if y < RULER_H:
-            return None
-        idx = int((y - RULER_H) // ROW_H)
-        return idx if 0 <= idx < len(self.tracks()) else None
+        return self.track_layout.index_at(y)
 
     def row_rect_y(self, index: int) -> float:
-        return RULER_H + index * ROW_H
+        return self.track_layout.top(index)
+
+    def row_height(self, index: int) -> int:
+        return self.track_layout.height(index)
 
     def clip_rect(self, clip: Clip, index: int, start: float | None = None, duration: float | None = None) -> QRectF:
         s = clip.timeline_start if start is None else start
         d = clip.duration if duration is None else duration
-        return QRectF(self.time_to_x(s), self.row_rect_y(index) + 3, max(2.0, d * self.pps), ROW_H - 6)
+        return QRectF(self.time_to_x(s), self.row_rect_y(index) + 3, max(2.0, d * self.pps), self.row_height(index) - 6)
 
     def content_height(self) -> int:
-        return RULER_H + max(1, len(self.tracks())) * ROW_H + 1
+        return self.track_layout.total_height
 
     def reload(self) -> None:
         """Recompute size/missing-media cache after the project or its content changed. (Zoom and scroll do not come through here.)"""
         project = self.ctx.ws.project
         self._missing = {a.id for a in project.missing_assets()} if project else set()
+        self.track_layout.update(self.tracks())
         self._wave_cache.clear()
         self.reload_qc_markers()
         self._apply_size()
@@ -164,7 +166,7 @@ class TimelineCanvas(QWidget):
         idx = next((i for i, t in enumerate(tracks) if t.id == m.get("track_id")), None)
         if end is None or end <= m["time"] + 1e-6 or idx is None:
             return None
-        return QRectF(self.time_to_x(m["time"]), self.row_rect_y(idx) + ROW_H - 4, max(3.0, (end - m["time"]) * self.pps), 3)
+        return QRectF(self.time_to_x(m["time"]), self.track_layout.bottom(idx) - 4, max(3.0, (end - m["time"]) * self.pps), 3)
 
     def _hit_marker(self, pos) -> dict | None:
         slack = 10.0 / self.pps
@@ -198,9 +200,98 @@ class TimelineCanvas(QWidget):
         self.update()
         self.zoom_changed.emit(self.pps)
 
+    # ------------------------------------------------------------ viewport: zoom / fit / scroll (the scroll area is the canvas' parent's parent)
+    def scroll_area(self):
+        from PySide6.QtWidgets import QScrollArea  # noqa: PLC0415
+
+        w = self.parentWidget()
+        while w is not None and not isinstance(w, QScrollArea):
+            w = w.parentWidget()
+        return w
+
+    def viewport_width(self) -> int:
+        sa = self.scroll_area()
+        return sa.viewport().width() if sa is not None else self.width()
+
+    def visible_time_range(self) -> tuple[float, float]:
+        sa = self.scroll_area()
+        x0 = sa.horizontalScrollBar().value() if sa is not None else 0
+        return x0 / self.pps, (x0 + self.viewport_width()) / self.pps
+
+    def scroll_to_time(self, t: float, align: str = "left") -> None:
+        """Scroll horizontally so ``t`` is at the left edge (``align="left"``, with a small margin) or in the middle (``"center"``)."""
+        sa = self.scroll_area()
+        if sa is None:
+            return
+        x = self.time_to_x(t)
+        sa.horizontalScrollBar().setValue(int(x - (self.viewport_width() / 2 if align == "center" else 60)))
+
+    def ensure_time_visible(self, t: float, margin_px: int = 40) -> bool:
+        """Scroll the least amount that brings ``t`` into view. Returns True when it scrolled."""
+        sa = self.scroll_area()
+        if sa is None:
+            return False
+        bar, x = sa.horizontalScrollBar(), self.time_to_x(t)
+        left, right = bar.value(), bar.value() + self.viewport_width()
+        if x < left + margin_px:
+            bar.setValue(int(x - margin_px))
+        elif x > right - margin_px:
+            bar.setValue(int(x - self.viewport_width() + margin_px))
+        else:
+            return False
+        return True
+
+    def zoom_at(self, pps: float, anchor_time: float | None = None, anchor_viewport_x: float | None = None) -> None:
+        """Zoom so that ``anchor_time`` stays under ``anchor_viewport_x`` (default: the viewport centre) - zooming around the pointer / playhead, not around 0."""
+        sa = self.scroll_area()
+        if sa is None:
+            self.set_zoom(pps)
+            return
+        bar = sa.horizontalScrollBar()
+        vx = self.viewport_width() / 2 if anchor_viewport_x is None else anchor_viewport_x
+        t = (bar.value() + vx) / self.pps if anchor_time is None else anchor_time
+        self.set_zoom(pps)
+        bar.setValue(int(self.time_to_x(t) - vx))
+
+    def zoom_to_range(self, t0: float, t1: float, margin_px: int = 40) -> None:
+        """Fit [t0, t1] into the viewport and scroll it to the left edge."""
+        span = max(t1 - t0, 0.05)
+        pps = max(MIN_PPS, min(MAX_PPS, (self.viewport_width() - 2 * margin_px) / span))
+        self.set_zoom(pps)
+        self.scroll_to_time(max(0.0, t0 - margin_px / self.pps), "left")
+        sa = self.scroll_area()
+        if sa is not None:
+            sa.horizontalScrollBar().setValue(int(self.time_to_x(t0) - margin_px))
+
+    def zoom_to_fit(self) -> None:
+        """Show the whole timeline (0 .. its end)."""
+        project = self.ctx.ws.project
+        end = project.timeline.duration if project else 0.0
+        self.zoom_to_range(0.0, end if end > 0 else 10.0)
+
+    def zoom_to_selection(self) -> bool:
+        """Fit the selected clips (their combined span). Returns False when nothing is selected."""
+        project = self.ctx.ws.project
+        if project is None:
+            return False
+        span = self.ctx.ws.selection.span(project.timeline)
+        if not span:
+            return False
+        self.zoom_to_range(span[0], span[1])
+        return True
+
+    def _sync_playhead(self, seconds: float) -> None:
+        if abs(seconds - self.playhead) > 1e-9:
+            old, self.playhead = self.playhead, max(0.0, seconds)
+            self.playhead_changed.emit(self.playhead)
+            h = self.height()
+            for t in (old, self.playhead):
+                self.update(QRect(int(self.time_to_x(t)) - 9, 0, 19, h))
+
     def set_playhead(self, seconds: float) -> None:
         old = self.playhead
         self.playhead = max(0.0, seconds)
+        self.ctx.ws.edit.set_playhead(self.playhead)  # the one authoritative playhead (the snap engine, split, paste, markers and shortcuts read it)
         self.playhead_changed.emit(self.playhead)
         h = self.height()
         for t in (old, self.playhead):  # only the strips around the old and new playhead need repainting
@@ -238,13 +329,12 @@ class TimelineCanvas(QWidget):
         fm = QFontMetrics(self.font())
 
         # rows (only those the exposed rectangle touches)
-        first = max(0, int((y0 - RULER_H) // ROW_H))
-        last = min(len(tracks) - 1, int((y1 - RULER_H) // ROW_H))
-        for i in range(first, last + 1):
-            y = self.row_rect_y(i)
-            p.fillRect(QRectF(x0, y, x1 - x0, ROW_H), self._qcolor(c["panel"] if i % 2 == 0 else c["panel2"]))
+        rows = self.track_layout.visible(y0, y1)
+        for i in rows:
+            y, h = self.row_rect_y(i), self.row_height(i)
+            p.fillRect(QRectF(x0, y, x1 - x0, h), self._qcolor(c["panel"] if i % 2 == 0 else c["panel2"]))
             p.setPen(QPen(self._qcolor(c["border"])))
-            p.drawLine(int(x0), int(y + ROW_H), int(x1), int(y + ROW_H))
+            p.drawLine(int(x0), int(y + h), int(x1), int(y + h))
 
         # ruler (ticks inside the exposed x range, plus a margin for labels that start left of it)
         if y0 < RULER_H:
@@ -270,7 +360,7 @@ class TimelineCanvas(QWidget):
         selected = self.ctx.ws.selected_clip_id
         drag = self._drag if self._drag and self._drag.mode != "playhead" else None
         t0, t1 = (x0 - 6) / self.pps, (x1 + 4) / self.pps
-        for i in range(first, last + 1):
+        for i in rows:
             track = tracks[i]
             last_col = None
             for clip in project.timeline.clips_in_range(track.id, t0, t1):
@@ -288,7 +378,7 @@ class TimelineCanvas(QWidget):
             self._paint_clip(p, c, fm, d.orig, d.track_index, track, True, d.start, d.end - d.start, ghost=True)
         if self._drop_preview:
             idx, start, dur = self._drop_preview
-            r = QRectF(self.time_to_x(start), self.row_rect_y(idx) + 3, max(2.0, dur * self.pps), ROW_H - 6)
+            r = QRectF(self.time_to_x(start), self.row_rect_y(idx) + 3, max(2.0, dur * self.pps), self.row_height(idx) - 6)
             p.setPen(QPen(QColor(c["accent"]), 2, Qt.PenStyle.DashLine))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRoundedRect(r, 4, 4)
@@ -578,7 +668,8 @@ class TimelineCanvas(QWidget):
 
     def wheelEvent(self, e) -> None:  # noqa: N802
         if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self.set_zoom(self.pps * (1.15 if e.angleDelta().y() > 0 else 1 / 1.15))
+            pos = self.mapTo(self.scroll_area().viewport(), e.position().toPoint()) if self.scroll_area() is not None else None
+            self.zoom_at(self.pps * (1.15 if e.angleDelta().y() > 0 else 1 / 1.15), self.x_to_time(e.position().x()), pos.x() if pos is not None else None)  # zoom around the pointer
             e.accept()
         else:
             e.ignore()  # let the scroll area scroll
