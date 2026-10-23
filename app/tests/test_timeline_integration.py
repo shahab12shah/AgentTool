@@ -101,6 +101,34 @@ def test_trim_slip_and_speed_change_the_export_frames(cut_ws, tmp_path):
     assert near(centre_colour(out2, 0.25), RED) and near(centre_colour(out2, 0.75), GREEN)  # red then green, each half as long
 
 
+def test_preview_model_and_render_agree_after_a_sequence_of_edits(cut_ws, tmp_path):
+    """The preview composer, the timeline model and the exported video are three readers of one model: for sample times they must name the same source moment."""
+    ws = cut_ws
+    v = track(ws)
+    ws.edit.state.update(linked_selection=False, ripple_on=False)
+    ws.edit.blade(1.0, v.id)
+    ws.edit.blade(2.0, v.id)
+    first, mid, last = ws.project.timeline.get_track(v.id).clips
+    ws.edit.delete([mid.id], ripple=True)  # red | blue, closed up
+    ws.edit.move_clips([last.id], 0.5)  # blue starts half a second later: a 0.5 s gap (black) after red
+    ws.edit.trim(last.id, "end", 2.2)  # and only its first 0.7 s are shown
+    out, info = export(ws, tmp_path, "agree")
+    expected = {"red": RED, "green": GREEN, "blue": BLUE}
+    band = lambda src: ("red", "green", "blue")[min(2, int(src + 1e-6))]  # noqa: E731  (the source video shows red, green, blue for one second each)
+    composer = ws.editing.composer()
+    seen = set()
+    for t in (0.2, 0.8, 1.2, 1.6, 2.0, 2.8):
+        layers = [layer for layer in composer.frame_at(t).layers if layer.kind == "media" and layer.asset_id == ws.rgb.id]
+        col = centre_colour(out, t)
+        if not layers:
+            assert near(col, (0, 0, 0)), (t, col)  # nothing on the timeline there: black in the export too
+            continue
+        seen.add(band(layers[0].src_time))
+        assert near(col, expected[band(layers[0].src_time)]), (t, layers[0].src_time, col)  # the preview's source moment is the colour the export shows
+    assert seen == {"red", "blue"}
+    assert info.duration == pytest.approx(ws.project.timeline.duration, abs=0.2)
+
+
 # ------------------------------------------------------------------------------------------------------------------------ undo / redo is exact (randomised)
 def random_ops(ws, rng):
     tl = ws.project.timeline
