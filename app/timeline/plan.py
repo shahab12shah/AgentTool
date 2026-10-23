@@ -88,6 +88,17 @@ class EditPlan:
 
 
 # ------------------------------------------------------------------------------------------------------------------------ rules
+def _untimed(text):
+    """A caption / graphic text block without its timing keys: moving or trimming the clip rewrites those, which must not count as a *style* change (a style lock must not block a move)."""
+    if not isinstance(text, dict):
+        return text
+    out = {k: v for k, v in text.items() if k not in ("start", "end", "duration", "words", "lines", "reading_cps", "emphasis")}
+    words = text.get("words")
+    if isinstance(words, list):
+        out["words"] = [{k: v for k, v in w.items() if k not in ("start", "end")} if isinstance(w, dict) else w for w in words]
+    return out
+
+
 def changed_aspects(old: Clip, new: Clip) -> set[str]:
     """Which lock kinds an edit from ``old`` to ``new`` touches."""
     out: set[str] = set()
@@ -100,7 +111,7 @@ def changed_aspects(old: Clip, new: Clip) -> set[str]:
         out.add("transform")
     if old.audio != new.audio:
         out.add("audio")
-    if old.text != new.text or old.animation != new.animation or old.effects != new.effects or old.transition != new.transition:
+    if _untimed(old.text) != _untimed(new.text) or old.animation != new.animation or old.effects != new.effects or old.transition != new.transition:
         out.add("style")
     if [k.__dict__ for k in old.keyframes] != [k.__dict__ for k in new.keyframes]:
         changed = {k.property for k in old.keyframes} ^ {k.property for k in new.keyframes}

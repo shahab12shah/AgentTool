@@ -288,3 +288,15 @@ def test_plan_env_for_project_resolves_assets_and_timebase():
     env = PlanEnv.for_project(p)
     assert env.asset_info(aid) == ("video", 12.0, "x.mp4") and env.asset_info("missing") is None and env.timebase == timebase_of(p)
     assert env.label(Clip("c", "track_v1", aid, 0, 1)) == "x.mp4" and env.label(Clip("c2", "track_v6", "", 0, 1, kind="caption", text={"text": "Hello there"})) == "“Hello there”"
+
+
+def test_moving_a_caption_is_not_a_style_change():
+    text = {"text": "Hello world", "start": 1.0, "end": 2.0, "lines": ["Hello world"], "reading_cps": 11.0, "words": [{"word": "Hello", "start": 1.0, "end": 1.4}, {"word": "world", "start": 1.5, "end": 2.0}]}
+    cap = Clip("cp", "track_v6", "", 1.0, 1.0, kind="caption", text=text, locks=frozenset({"style"}))
+    moved_cap = cap.snapshot()
+    moved_cap.timeline_start = 3.0
+    moved_cap.text = {**text, "start": 3.0, "end": 4.0, "words": [{"word": "Hello", "start": 3.0, "end": 3.4}, {"word": "world", "start": 3.5, "end": 4.0}]}
+    assert changed_aspects(cap, moved_cap) == {"position"}  # the style lock does not block a move
+    edited = moved_cap.snapshot()
+    edited.text = {**moved_cap.text, "text": "Goodbye world"}
+    assert "style" in changed_aspects(moved_cap, edited)

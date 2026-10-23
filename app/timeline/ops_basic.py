@@ -28,7 +28,14 @@ from fractions import Fraction
 
 from app.core.constants import MIN_CLIP_DURATION, TIME_EPSILON
 from app.core.exceptions import TimelineError
-from app.timeline.clip import KIND_CAPTION, KIND_GRAPHIC, KIND_MEDIA, KIND_TEXT, LOCK_KINDS, Clip
+from app.timeline.clip import (
+    KIND_CAPTION,
+    KIND_GRAPHIC,
+    KIND_MEDIA,
+    KIND_TEXT,
+    LOCK_KINDS,
+    Clip,
+)
 from app.timeline.keyframes import window_keyframes
 from app.timeline.ops_common import new_group_id, new_link_id, quantize_delta, relatives
 from app.timeline.plan import EditPlan, PlanEnv, clip_fits_track, validate_plan
@@ -40,8 +47,21 @@ SAMPLE_RATE = 48000
 SOURCE_SPECIFIC_EFFECTS = ("crop", "focus_region")  # belong to one piece of media: dropped when the media is replaced
 
 __all__ = [
-    "Grid", "plan_move", "plan_set_start", "plan_set_duration", "plan_set_source_range", "plan_trim", "plan_split", "plan_delete", "plan_duplicate",
-    "plan_overwrite", "plan_replace", "plan_insert_free", "sync_text_timing", "fresh_copy", "remap_ids",
+    "Grid",
+    "fresh_copy",
+    "plan_delete",
+    "plan_duplicate",
+    "plan_insert_free",
+    "plan_move",
+    "plan_overwrite",
+    "plan_replace",
+    "plan_set_duration",
+    "plan_set_source_range",
+    "plan_set_start",
+    "plan_split",
+    "plan_trim",
+    "remap_ids",
+    "sync_text_timing",
 ]
 
 
@@ -49,7 +69,7 @@ __all__ = [
 class Grid:
     """Rounds times to the frame grid (picture, captions, graphics) or to the sample grid (audio-track clips)."""
 
-    __slots__ = ("audio", "tb", "sr", "min_duration")
+    __slots__ = ("audio", "min_duration", "sr", "tb")
 
     def __init__(self, env: PlanEnv, audio: bool, sample_rate: int = SAMPLE_RATE) -> None:
         self.audio, self.tb, self.sr = audio, env.timebase, sample_rate
@@ -67,12 +87,6 @@ class Grid:
         if not math.isfinite(t):
             return t
         return self._samples(t, math.ceil, Fraction(-1, 1_000_000)) if self.audio else self.tb.snap(t, "ceil")
-
-    def on(self, t: float) -> bool:
-        if self.audio:
-            x = t * self.sr
-            return abs(x - round(x)) < 1e-3
-        return self.tb.is_on_frame(t)
 
     def _samples(self, t: float, fn, off: Fraction) -> float:
         return float(Fraction(fn(Fraction(float(t)) * self.sr + off), self.sr))
@@ -395,13 +409,16 @@ def _edge_limits(env: PlanEnv, clip: Clip, edge: str, grid: Grid) -> tuple[float
     return lo_q, lo_why, hi_q, hi_why
 
 
-def _with_edge(clip: Clip, edge: str, t: float) -> Clip:
+def _with_edge(env: PlanEnv, clip: Clip, edge: str, t: float) -> Clip:
     """``clip`` with one edge moved to timeline time ``t`` (source range, keyframes and text timing follow)."""
     c = clip.snapshot()
     s, e = clip.timeline_start, clip.timeline_end
+    still = clip.kind == KIND_MEDIA and not _source_info(env, clip)[0] and env.asset_info(clip.asset_id) is not None  # a picture: no source timeline to map
     if edge == "start":
         c.timeline_start, c.duration = t, e - t
-        if clip.kind == KIND_MEDIA:
+        if still:
+            c.source_out = _r(clip.source_in + c.duration * clip.speed)
+        elif clip.kind == KIND_MEDIA:
             c.source_in = max(0.0, _r(clip.source_in + (t - s) * clip.speed))  # source_out stays
         if clip.keyframes and abs(t - s) > 1e-12:
             c.keyframes = window_keyframes(clip.keyframes, t - s, clip.duration)
@@ -463,7 +480,7 @@ def plan_trim(env: PlanEnv, clip_id: str, edge: str, new_time: float, *, linked:
         if snap:
             t = g.snap(t)
         t = min(max(t, lo), hi)
-        updates[m.id] = _with_edge(m, edge, t)
+        updates[m.id] = _with_edge(env, m, edge, t)
     return EditPlan(desc, updates=updates, notes=notes)
 
 
@@ -604,7 +621,7 @@ def plan_split(env: PlanEnv, ids: list[str], at: float, *, linked: bool = True, 
     for (left, right) in pairs:
         if left.link_id:
             by_link.setdefault(left.link_id, []).append(right)
-    for old, group in by_link.items():
+    for group in by_link.values():
         fresh = new_link_id() if len(group) >= 2 else ""
         for r in group:
             r.link_id = fresh

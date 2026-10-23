@@ -12,7 +12,12 @@ import pytest
 from app.core.constants import MIN_CLIP_DURATION
 from app.core.exceptions import TimelineError
 from app.timeline.clip import Clip
-from app.timeline.clipboard import ClipboardData, copy_attributes, plan_paste, plan_paste_attributes
+from app.timeline.clipboard import (
+    ClipboardData,
+    copy_attributes,
+    plan_paste,
+    plan_paste_attributes,
+)
 from app.timeline.keyframes import Keyframe, value_at
 from app.timeline.ops_basic import (
     plan_delete,
@@ -364,14 +369,36 @@ def test_trim_end_limits_and_minimum_length():
     assert p.updates["b"].duration == 1
     p = plan_trim(env, "b", "end", 10.001)
     assert p.updates["b"].duration == pytest.approx(env.timebase.to_seconds(2)) and "minimum" in p.notes[0]
-    add(env, "c", 20, 2, asset="img")
+    add(env, "c", 20, 2, asset="img", track="track_v3")
     p = plan_trim(env, "c", "end", 400.0)  # a picture has no source limit
     assert p.updates["c"].duration == 380 and not p.notes
     p = plan_trim(env, "c", "start", 3.0)
-    assert p.updates["c"].timeline_start == 3 and not p.notes
+    assert p.updates["c"].timeline_start == 3 and not p.notes and (p.updates["c"].source_in, p.updates["c"].source_out) == (0.0, 19.0)
     assert plan_trim(env, "c", "end", 22.0).empty
     with pytest.raises(TimelineError, match="start or the end"):
         plan_trim(env, "c", "middle", 3)
+
+
+def test_trim_start_past_the_end_stops_at_the_minimum_length():
+    env = make_env(30)
+    add(env, "a", 0, 4, si=1.0)
+    p = plan_trim(env, "a", "start", 9.0)
+    assert p.updates["a"].timeline_end == pytest.approx(4.0) and p.updates["a"].duration == pytest.approx(env.timebase.to_seconds(2)) and "minimum" in p.notes[0]
+    apply(env, p)
+    check_invariants(env)
+
+
+def test_trim_keeps_text_timing_in_step():
+    env = make_env(30)
+    _caption(env)
+    env.timeline.insert_clip(Clip("g", "track_v5", "", 0.0, 4.0, kind="text", text={"content": "Title", "start": 0.0, "duration": 4.0}))
+    apply(env, plan_trim(env, "cap", "end", 12.0))
+    t = clip_of(env, "cap").text
+    assert (t["start"], t["end"]) == (10.0, 12.0) and t["words"][-1]["end"] == 12.9  # words stay where they were spoken
+    apply(env, plan_trim(env, "g", "start", 1.0))
+    assert clip_of(env, "g").text["start"] == 1.0 and clip_of(env, "g").text["duration"] == 3.0
+    apply(env, plan_set_start(env, "g", 5.0))
+    assert clip_of(env, "g").text["start"] == 5.0
 
 
 def test_trim_at_timeline_start_cannot_go_negative():
@@ -513,6 +540,16 @@ def test_split_ai_fields_like_the_split_command():
     right = next(c for c in env.timeline.all_clips() if c.id != "a")
     assert (left.created_by, left.ai_decision_id, left.locked, left.slot) == ("AI", "d1", True, "visual:0")
     assert (right.created_by, right.ai_decision_id, right.locked, right.slot, right.scene_id) == ("USER", "", False, "visual:0.r", "s1")
+
+
+def test_split_keeps_audio_fades_only_at_the_outer_edges():
+    env = make_env(30)
+    add(env, "au", 0, 10, asset="a20", track="track_a1", audio={"volume": 0.8, "fade_in": 1.0, "fade_out": 2.0})
+    plan = plan_split(env, ["au"], 4.0)
+    apply(env, plan)
+    left, right = clip_of(env, "au"), clip_of(env, plan.adds[0].id)
+    assert left.audio == {"volume": 0.8, "fade_in": 1.0, "fade_out": 0.0}
+    assert right.audio == {"volume": 0.8, "fade_in": 0.0, "fade_out": 2.0}
 
 
 def test_split_keyframes_are_continuous():
@@ -826,9 +863,9 @@ def test_overwrite_source_mapping_matches_a_brute_force_model():
         for i in range(rng.randint(1, 3)):
             cur += rng.choice([0, 0.5, 2])
             d = rng.choice([0.5, 1, 2.5, 6])
-            news.append(new_clip(f"n{i}", cur, d, asset="v4", si=rng.choice([0, 1])))
+            news.append(new_clip(f"n{i}", cur, d, asset="v30", si=rng.choice([0, 1])))
             cur += d + rng.choice([0, 1, 2])
-        ticks = [(k + 0.5) / 30 for k in range(0, 30 * 30)]
+        ticks = [(k + 0.5) / 30 for k in range(30 * 30)]
         before = {t: mapping(env, t) for t in ticks}
         try:
             plan = plan_overwrite(env, news)
@@ -1073,7 +1110,7 @@ def _build_random_timeline(env: PlanEnv, rng: random.Random) -> None:
 def _random_plan(env: PlanEnv, rng: random.Random, clip_data: list):
     tl = env.timeline
     clips = tl.all_clips()
-    pick = lambda n=1: [c.id for c in rng.sample(clips, min(n, len(clips)))]  # noqa: E731
+    pick = lambda n=1: [c.id for c in rng.sample(clips, min(n, len(clips)))]
     t = rng.uniform(-1, 25)
     op = rng.choice(["move", "move", "trim", "trim", "split", "delete", "dup", "overwrite", "replace", "dur", "paste", "start", "src"])
     if op == "move":
@@ -1085,11 +1122,15 @@ def _random_plan(env: PlanEnv, rng: random.Random, clip_data: list):
     if op == "trim":
         return plan_trim(env, pick()[0], rng.choice(["start", "end"]), t, linked=rng.random() < 0.7)
     if op == "split":
-        return plan_split(env, pick(rng.randint(1, 2)), t, include_intersecting_on=rng.choice([None, ["track_v1", "track_a1"]]))
+        ids = pick(rng.randint(1, 2))
+        if rng.random() < 0.8:  # mostly cut somewhere inside the first clip
+            c = tl.find_clip(ids[0])[1]
+            t = rng.uniform(c.timeline_start, c.timeline_end)
+        return plan_split(env, ids, t, include_intersecting_on=rng.choice([None, ["track_v1", "track_a1"]]))
     if op == "delete":
         return plan_delete(env, pick())
     if op == "dup":
-        return plan_duplicate(env, pick(rng.randint(1, 2)), offset=rng.choice([None, rng.uniform(-2, 8)]))
+        return plan_duplicate(env, pick(rng.randint(1, 2)), offset=rng.choice([None, rng.uniform(-2, 8), rng.uniform(15, 40)]))
     if op == "overwrite":
         return plan_overwrite(env, [new_clip(f"ow{rng.randint(0, 10**6)}", max(0.0, t), rng.choice([0.5, 1, 3]), asset=rng.choice(["v4", "v10"]), track=rng.choice(["track_v1", "track_v2"]))])
     if op == "replace":
@@ -1146,7 +1187,7 @@ def test_random_edit_sequences_keep_invariants_and_undo_redo_exactly(seed, fps):
 
 def test_trim_and_split_preserve_source_mapping_of_surviving_material():
     rng = random.Random(11)
-    for _ in range(60):
+    for _ in range(250):
         env = make_env(30)
         t = 0.0
         for i in range(4):
@@ -1154,7 +1195,7 @@ def test_trim_and_split_preserve_source_mapping_of_surviving_material():
             d = rng.choice([2, 3, 4])
             add(env, f"e{i}", t, d, asset="v30", si=rng.choice([0, 3, 7]), speed=rng.choice([1.0, 2.0]))
             t += d
-        ticks = [(k + 0.5) / 30 for k in range(0, 30 * 20)]
+        ticks = [(k + 0.5) / 30 for k in range(30 * 20)]
         before = {x: mapping(env, x) for x in ticks}
         cid = rng.choice([c.id for c in env.timeline.all_clips()])
         try:
@@ -1172,3 +1213,45 @@ def test_trim_and_split_preserve_source_mapping_of_surviving_material():
                 assert after[0] == before[x][0] and after[1] == pytest.approx(before[x][1], abs=1e-6)
             if plan.adds:  # a split never loses material
                 assert (before[x] is None) == (after is None)
+
+
+# ------------------------------------------------------------------------------------------------------------------------ locks are enforced by PlanCommand for every planner
+def _lock_cases():
+    def mk():
+        env = make_env(30)
+        add(env, "a", 0, 4, link_id="L")
+        add(env, "au", 0, 4, asset="a20", track="track_a1", link_id="L")
+        add(env, "b", 6, 4, track="track_v2")
+        return env
+
+    yield "move", mk, lambda e: plan_move(e, ["a"], 1)
+    yield "trim", mk, lambda e: plan_trim(e, "a", "end", 3.0)
+    yield "split", mk, lambda e: plan_split(e, ["a"], 2.0)
+    yield "delete", mk, lambda e: plan_delete(e, ["a"])
+    yield "replace", mk, lambda e: plan_replace(e, "b", "v30")
+    yield "overwrite", mk, lambda e: plan_overwrite(e, [new_clip("n", 7, 1, track="track_v2")])
+    yield "duplicate", mk, lambda e: plan_duplicate(e, ["b"], to_start=20.0)
+    yield "paste", mk, lambda e: plan_paste(e, ClipboardData.from_clips(e.timeline, ["b"]), 30.0)
+    yield "insert", mk, lambda e: plan_insert_free(e, [new_clip("n", 0, 1, track="track_v2")], 20.0, "track_v2")
+
+
+@pytest.mark.parametrize("name,mk,planner", list(_lock_cases()), ids=[c[0] for c in _lock_cases()])
+def test_every_planner_result_is_refused_on_locked_tracks_and_leaves_the_timeline_untouched(name, mk, planner):
+    env = mk()
+    plan = planner(env)
+    assert not plan.empty
+    apply(env, plan)  # without locks the plan works, undoes and redoes exactly
+    env = mk()
+    plan = planner(env)
+    for t in env.timeline.tracks:
+        t.locked = True
+    rejects(env, plan, "locked")
+
+
+@pytest.mark.parametrize("name,mk,planner", list(_lock_cases())[:5], ids=[c[0] for c in _lock_cases()][:5])
+def test_item_locked_clips_are_refused_by_the_planners(name, mk, planner):
+    env = mk()
+    for c in env.timeline.all_clips():
+        c.locks = frozenset({"item"})
+    with pytest.raises(TimelineError, match="locked"):
+        planner(env)

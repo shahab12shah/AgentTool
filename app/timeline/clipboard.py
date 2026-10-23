@@ -17,7 +17,13 @@ from typing import Any
 from app.core.constants import TIME_EPSILON
 from app.core.exceptions import TimelineError
 from app.timeline.clip import KIND_MEDIA, Clip
-from app.timeline.ops_basic import SOURCE_SPECIFIC_EFFECTS, Grid, fresh_copy, plan_overwrite, remap_ids
+from app.timeline.ops_basic import (
+    SOURCE_SPECIFIC_EFFECTS,
+    Grid,
+    fresh_copy,
+    plan_overwrite,
+    remap_ids,
+)
 from app.timeline.ops_common import new_group_id, new_link_id, relatives
 from app.timeline.plan import EditPlan, PlanEnv, clip_fits_track, validate_plan
 from app.timeline.timeline import Timeline
@@ -43,7 +49,7 @@ class ClipboardData:
 
     # ------------------------------------------------------------------ capture
     @classmethod
-    def from_clips(cls, tl: Timeline, ids: list[str], *, linked: bool = True, grouped: bool = True) -> "ClipboardData":
+    def from_clips(cls, tl: Timeline, ids: list[str], *, linked: bool = True, grouped: bool = True) -> ClipboardData:
         all_ids = relatives(tl, list(ids), linked=linked, grouped=grouped)
         if not all_ids:
             raise TimelineError("Select at least one clip to copy.")
@@ -73,7 +79,7 @@ class ClipboardData:
         }
 
     @classmethod
-    def from_dict(cls, d: Any) -> "ClipboardData":
+    def from_dict(cls, d: Any) -> ClipboardData:
         try:
             clips = list(d["clips"])
             n = len(clips)
@@ -98,7 +104,7 @@ class ClipboardData:
         return json.dumps(self.to_dict(), sort_keys=True)
 
     @classmethod
-    def from_json(cls, text: str) -> "ClipboardData":
+    def from_json(cls, text: str) -> ClipboardData:
         try:
             return cls.from_dict(json.loads(text))
         except (TypeError, ValueError):
