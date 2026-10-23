@@ -106,6 +106,9 @@ class Workspace:
         self.selection.subscribe(self._on_selection_model_changed)
         self.edit_state = TimelineEditState.from_dict(self.settings.timeline_ui)  # tool / ripple / snapping / linked selection / follow playhead; preferences persist in settings.json
         self.edit_state.subscribe(self._on_edit_state_changed)
+        from app.services.timeline_edit_service import TimelineEditService  # noqa: PLC0415
+
+        self.edit = TimelineEditService(self.projects, self.commands, self.bus, self.selection, self.edit_state, self.timeline)  # every professional edit: planner -> validated PlanCommand -> one undo step
 
         self.bus.subscribe(Topics.PROJECT_CHANGED, self._on_project_changed)
 
