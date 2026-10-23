@@ -37,8 +37,9 @@ from typing import Callable, Iterable
 from app.core.constants import MIN_CLIP_DURATION, TIME_EPSILON
 from app.core.exceptions import TimelineError
 from app.timeline.clip import KIND_MEDIA, LOCK_KINDS, Clip
-from app.timeline.ops_basic import (  # the trim / cut rules live in ops_basic; reused so a ripple trims exactly like a plain trim / split
-    Grid, _cut_clip, _lock_problem, _make_piece, _r, _source_info, _with_edge, _word_index, sync_text_timing,
+from app.timeline.keyframes import window_keyframes
+from app.timeline.ops_basic import (  # the cut / lock rules live in ops_basic; reused so a ripple splits and trims exactly like a plain split / trim
+    Grid, _cut_clip, _lock_problem, _make_piece, _r, _source_info, _word_index, sync_text_timing,
 )
 from app.timeline.ops_common import link_members, new_link_id, quantize_delta, relatives
 from app.timeline.plan import EditPlan, PlanEnv, changed_aspects
@@ -79,6 +80,16 @@ def _diff(env: PlanEnv, a: float, b: float) -> float:
     if tb.is_on_frame(a) and tb.is_on_frame(b):
         return tb.to_seconds(tb.to_frame(b) - tb.to_frame(a))
     return b - a
+
+
+def _num(value: float, what: str) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise TimelineError(f"The {what} is not a number.") from None
+    if not math.isfinite(v):
+        raise TimelineError(f"The {what} is not a valid number.")
+    return v
 
 
 def _is_audio(tl: Timeline, track_id: str) -> bool:
@@ -218,7 +229,7 @@ class _Run:
         aspects = set(LOCK_KINDS) if new is None else set(changed_aspects(old, new)) | set(extra)
         msg = _lock_problem(self.env, old, tuple(sorted(aspects)), action)
         if msg:
-            raise TimelineError(f"{msg} A ripple edit has to change it - unlock it, or use a ripple scope that leaves it out.")
+            raise TimelineError(f"{msg} The ripple would have to change it; a narrower ripple scope leaves it out.")
 
     # ---------------------------------------------------------------- relations
     def _relations(self) -> tuple[dict[str, list[Clip]], dict[str, list[Clip]]]:
@@ -348,7 +359,7 @@ class _Run:
         if self.splits:
             out.append(f"Split {_plural(self.splits, 'clip')} where the edit crossed them.")
         if self.cut_away:
-            out.append(f"{_plural(self.cut_away)} inside the removed time on other tracks {'was' if self.cut_away == 1 else 'were'} removed with it.")
+            out.append(f"{_plural(self.cut_away)} on other tracks had nothing left after the edit and {'was' if self.cut_away == 1 else 'were'} removed with it.")
         if self.slivers:
             out.append(f"{_plural(self.slivers, 'fragment')} shorter than the minimum clip length {'was' if self.slivers == 1 else 'were'} removed.")
         if self.text_dropped:
@@ -427,6 +438,31 @@ def _edge_range(env: PlanEnv, clip: Clip, edge: str) -> tuple[float, str, float,
     return lo_q, lo_why, hi_q, hi_why
 
 
+def _trim_edge(env: PlanEnv, clip: Clip, edge: str, t: float) -> Clip:
+    """``clip`` with one edge moved to timeline time ``t`` - the ``plan_trim`` rules: a start trim advances ``source_in`` by ``delta * speed`` (``source_out`` stays), an end trim
+    moves ``source_out`` with the duration, keyframes are windowed, text timing follows; a picture has no source timeline to map."""
+    c = clip.snapshot()
+    s, e = clip.timeline_start, clip.timeline_end
+    bound = _source_info(env, clip)[0]
+    still = clip.kind == KIND_MEDIA and not bound and env.asset_info(clip.asset_id) is not None
+    if edge == "start":
+        c.timeline_start, c.duration = t, _diff(env, t, e)
+        if still:
+            c.source_out = _r(clip.source_in + c.duration * clip.speed)
+        elif clip.kind == KIND_MEDIA:
+            c.source_in = max(0.0, _r(clip.source_in + (t - s) * clip.speed))
+        if clip.keyframes and abs(t - s) > 1e-12:
+            c.keyframes = window_keyframes(clip.keyframes, t - s, clip.duration)
+    else:
+        c.duration = _diff(env, s, t)
+        if clip.kind == KIND_MEDIA:
+            c.source_out = _r(clip.source_in + c.duration * clip.speed)
+        if clip.keyframes and c.duration < clip.duration - 1e-12:
+            c.keyframes = window_keyframes(clip.keyframes, 0.0, c.duration)
+    sync_text_timing(c)
+    return c
+
+
 def _apply_edge(env: PlanEnv, clip: Clip, edge: str, t: float, *, who: str = "") -> Clip:
     """``clip`` with one edge moved to ``t`` (the trim rules of ``plan_trim``); raises with the reason if the clip itself does not allow it."""
     lo, lo_why, hi, hi_why = _edge_range(env, clip, edge)
@@ -441,9 +477,7 @@ def _apply_edge(env: PlanEnv, clip: Clip, edge: str, t: float, *, who: str = "")
             raise TimelineError(f"{name} would be shorter than the minimum clip length ({MIN_CLIP_DURATION:g} s).")
         room = hi - clip.timeline_end
         raise TimelineError(f"{name} has only {_fmt(max(room, 0.0))} of source media left after its current end.")
-    c = _with_edge(clip, edge, t)
-    c.duration = _diff(env, c.timeline_start, clip.timeline_end if edge == "start" else t)
-    return c
+    return _trim_edge(env, clip, edge, t)
 
 
 # ------------------------------------------------------------------------------------------------------------------------ ripple trim
@@ -463,7 +497,7 @@ def plan_ripple_trim(env: PlanEnv, clip_id: str, edge: str, new_time: float, *, 
     desc = f"Ripple trim clip {edge}"
     cur = clip.timeline_start if edge == "start" else clip.timeline_end
     grid = Grid(env, track.kind is TrackKind.AUDIO)
-    want = grid.snap(float(new_time)) - cur
+    want = grid.snap(_num(new_time, "trim time")) - cur
     tol = env.timebase.frame_s + _EPS
     members = [clip]
     if linked and clip.link_id:
@@ -501,8 +535,7 @@ def plan_ripple_trim(env: PlanEnv, clip_id: str, edge: str, new_time: float, *, 
         spec = _Spec("cut", cur, _plus(env, cur, d), audio)
     for m, _lo, _lw, _hi, _hw, pos in info:  # the edited clips themselves: plain trim rules, start (or end) stays, the rest of the ripple follows from the cut / gap
         t = _plus(env, pos, d)
-        n = _with_edge(m, edge, t)
-        n.duration = _diff(env, n.timeline_start, m.timeline_end if edge == "start" else t)
+        n = _trim_edge(env, m, edge, t)
         if edge == "start":
             n.timeline_start = m.timeline_start
             sync_text_timing(n, m.timeline_start - t)
@@ -545,16 +578,16 @@ def plan_ripple_insert(env: PlanEnv, clips: list[Clip], at: float, track_id: str
         if tr.locked:
             raise TimelineError(f"Track “{tr.name}” is locked. Unlock it to insert clips there.")
     audio_only = all(_is_audio(tl, c.track_id) for c in new)
-    at_q = Grid(env, audio_only).snap(float(at))
+    at_q = Grid(env, audio_only).snap(_num(at, "insert time"))
     if at_q < -_EPS:
         raise TimelineError("Clips cannot be inserted before 0:00.")
     lo = min(c.timeline_start for c in new)
     hi = max(c.timeline_end for c in new)
     off = _diff(env, lo, at_q)
     for c in new:
-        start = _plus(env, c.timeline_start, off)
-        sync_text_timing(c, start - c.timeline_start)
-        c.timeline_start = start
+        old_start = c.timeline_start
+        c.timeline_start = _plus(env, old_start, off)
+        sync_text_timing(c, c.timeline_start - old_start)
     span = _diff(env, lo, hi)
     spec = _Spec("gap", at_q, at_q + span, audio_only)
     specs = [spec]
@@ -596,7 +629,7 @@ def plan_ripple_move(env: PlanEnv, ids: list[str], delta: float, *, scope: str =
         if c.id not in moved and c.timeline_end > a + _EPS and c.timeline_start < b - _EPS:
             raise TimelineError(f"“{env.label(c)}” lies between the clips being moved. Select clips that are next to each other for a ripple move.")
     audio = base.kind is TrackKind.AUDIO
-    d = quantize_delta(env, float(delta), audio=audio)
+    d = quantize_delta(env, _num(delta, "move distance"), audio=audio)
     if abs(d) <= _EPS:
         return EditPlan(desc, notes=["Nothing moved."])
     notes: list[str] = []
@@ -659,7 +692,7 @@ def plan_roll(env: PlanEnv, left_id: str, right_id: str, new_boundary_time: floa
     if abs(gap) > _adjacent_tolerance(env):
         raise TimelineError(f"“{ln}” and “{rn}” are not next to each other (they are {_fmt(abs(gap))} apart, in that order), so there is no shared cut to roll.")
     grid = Grid(env, ltrack.kind is TrackKind.AUDIO)
-    t = grid.snap(float(new_boundary_time))
+    t = grid.snap(_num(new_boundary_time, "cut time"))
     dl, dr = t - left.timeline_end, t - right.timeline_start
     desc = "Roll edit"
     if abs(dl) <= _EPS and abs(dr) <= _EPS:
@@ -694,8 +727,8 @@ def slip_limits(env: PlanEnv, clip_id: str) -> tuple[float, float]:
     clip = env.timeline.find_clip(clip_id)[1]
     bound, total = _source_info(env, clip)
     if not bound:
-        raise TimelineError(f"“{env.label(clip)}” has no source media to slip (still images, text, graphics and captions have nothing to slide under their cut).")
-    return -clip.source_in, (_INF if total is None else max(total - clip.source_out, 0.0))
+        raise TimelineError(f"Nothing to slip: “{env.label(clip)}” has no source media (still images, text, graphics and captions have no content to slide under their cut).")
+    return 0.0 - clip.source_in, (_INF if total is None else max(total - clip.source_out, 0.0))
 
 
 def plan_slip(env: PlanEnv, clip_id: str, delta_source: float, *, linked: bool = True) -> EditPlan:
@@ -705,12 +738,11 @@ def plan_slip(env: PlanEnv, clip_id: str, delta_source: float, *, linked: bool =
     tl = env.timeline
     track, clip = tl.find_clip(clip_id)
     lo, hi = slip_limits(env, clip_id)
-    d = quantize_delta(env, float(delta_source), audio=track.kind is TrackKind.AUDIO)
-    frame = env.timebase.frame_s
-    if hi < d <= hi + frame:
-        d = hi
-    elif lo - frame <= d < lo:
-        d = lo
+    d = quantize_delta(env, _num(delta_source, "slip distance"), audio=track.kind is TrackKind.AUDIO)
+    half, notes = env.timebase.frame_s / 2 + _EPS, []
+    if hi < d <= hi + half or lo - half <= d < lo:  # a request a rounding step beyond the media: stop at the media (a whole frame beyond is rejected below)
+        d = hi if d > hi else lo
+        notes.append("The slip was stopped at the end of the source media." if d == hi else "The slip was stopped at the start of the source media.")
     if abs(d) <= _EPS:
         return EditPlan("Slip clip", notes=["The content is already there."])
     if d < lo - _EPS or d > hi + _EPS:
@@ -731,7 +763,7 @@ def plan_slip(env: PlanEnv, clip_id: str, delta_source: float, *, linked: bool =
         n = m.snapshot()
         n.source_in, n.source_out = _r(m.source_in + d), _r(m.source_out + d)
         updates[m.id] = n
-    return EditPlan("Slip clip", updates=updates)
+    return EditPlan("Slip clip", updates=updates, notes=notes)
 
 
 # ------------------------------------------------------------------------------------------------------------------------ slide
@@ -758,7 +790,7 @@ def slide_limits(env: PlanEnv, clip_id: str) -> tuple[float, float]:
     tl = env.timeline
     track, clip = tl.find_clip(clip_id)
     prev, nxt = _slide_neighbours(env, track, clip)
-    lo, hi = (-clip.timeline_start if prev is None else -_INF), _INF
+    lo, hi = (0.0 - clip.timeline_start if prev is None else -_INF), _INF
     if prev is not None:
         plo, _a, phi, _b = _edge_range(env, prev, "end")
         lo, hi = max(lo, plo - prev.timeline_end), min(hi, phi - prev.timeline_end)
@@ -776,7 +808,7 @@ def plan_slide(env: PlanEnv, clip_id: str, delta: float, *, linked: bool = True)
     tl = env.timeline
     track, clip = tl.find_clip(clip_id)
     prev, nxt = _slide_neighbours(env, track, clip)
-    d = quantize_delta(env, float(delta), audio=track.kind is TrackKind.AUDIO)
+    d = quantize_delta(env, _num(delta, "slide distance"), audio=track.kind is TrackKind.AUDIO)
     if abs(d) <= _EPS:
         return EditPlan("Slide clip", notes=["Nothing moved."])
     lo, hi = slide_limits(env, clip_id)
