@@ -46,7 +46,6 @@ def test_a_manual_trim_through_ws_edit_takes_ownership_in_the_same_undo_step(edi
 def test_regeneration_never_overwrites_a_clip_the_user_edited_with_the_new_tools(edit_ws, how):
     ws = edit_ws
     gen(ws)
-    p = ws.project
     sc, clip = single_visual(ws)
     ws.edit.state.update(linked_selection=False)
     if how == "move":
