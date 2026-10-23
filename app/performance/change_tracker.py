@@ -496,6 +496,15 @@ def _h_track(t: ProjectChangeTracker, c: Any) -> _Effect:
     return t._track_effect(tid, track)
 
 
+def _h_track_move(t: ProjectChangeTracker, c: Any) -> _Effect:
+    """Track order is the layer order of the picture: every scene that has a clip on the moved track is affected."""
+    return t._track_effect(getattr(c, "track_id", ""), None)
+
+
+def _h_track_duplicate(t: ProjectChangeTracker, c: Any) -> _Effect:
+    return t._track_effect(getattr(c, "new_track_id", "") or getattr(c, "track_id", ""), None)
+
+
 def _h_track_rename(t: ProjectChangeTracker, c: Any) -> _Effect:
     return _Effect(domains={D_TIMELINE}, deps={timeline_dep(c.track_id)})
 
@@ -642,6 +651,9 @@ def _h_nothing(t: ProjectChangeTracker, c: Any) -> _Effect:
 _SCOPE_NO_EFFECT = frozenset({"qc", "performance", "waveform", "proxies_ui"})
 # class name -> handler; subclasses are matched through their MRO. A class that is missing here falls back to a broad, "unknown" effect.
 _HANDLERS: dict[str, Callable[[ProjectChangeTracker, Any], _Effect]] = {
+    "MoveTrackCommand": _h_track_move, "SetTrackKindCommand": _h_track_move, "DuplicateTrackCommand": _h_track_duplicate, "RemoveTrackSafeCommand": _h_track_move,
+    "AddMarkerCommand": _h_nothing, "MoveMarkerCommand": _h_nothing, "EditMarkerCommand": _h_nothing, "DeleteMarkerCommand": _h_nothing, "SetRangeCommand": _h_nothing, "ClearRangeCommand": _h_nothing,
+    "SetTrackDisplayCommand": _h_nothing,
     "AddTrackCommand": _h_track, "RemoveTrackCommand": _h_track, "RenameTrackCommand": _h_track_rename, "SetTrackFlagCommand": _h_track, "SetTrackVolumeCommand": _h_track,
     "AddClipCommand": _h_add_clip, "DeleteClipCommand": _h_add_clip, "MoveClipCommand": _h_add_clip, "TrimClipCommand": _h_add_clip, "SetClipPropertiesCommand": _h_add_clip,
     "SplitClipCommand": _h_add_clip, "PlanCommand": _h_plan,

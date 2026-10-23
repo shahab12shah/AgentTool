@@ -290,7 +290,7 @@ def test_set_track_kind_rules():
     assert tl.get_track("track_v4").kind is TrackKind.TEXT
     cmd.undo()
     assert tl.get_track("track_v4").kind is TrackKind.GRAPHICS
-    with pytest.raises(TimelineError, match="“x”|g1|graphic|cannot be on a captions track") as e:
+    with pytest.raises(TimelineError, match="cannot be on a captions track") as e:
         SetTrackKindCommand(tl, "track_v4", "captions").do()
     assert "g1" in str(e.value)  # names the first offending clip
     with pytest.raises(TimelineError, match="cannot be on a audio track"):
