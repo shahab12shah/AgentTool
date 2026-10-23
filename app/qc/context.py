@@ -257,7 +257,7 @@ class QCContext:
             return False, ""
         if track is not None and track.locked:
             return True, f"Track {track.name} is locked"
-        if clip.locked:
+        if clip.protected:
             return True, "This element is locked by you"
         if str(clip.created_by).upper() == "USER":
             return True, "This element was edited or created by you"

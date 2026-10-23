@@ -45,7 +45,7 @@ def is_p5(c: Clip) -> bool:
 
 def owned(c: Clip) -> bool:
     """User-edited or locked: regeneration leaves it alone."""
-    return c.locked or c.created_by == Creator.USER.value
+    return c.protected or c.created_by == Creator.USER.value
 
 
 @dataclass
@@ -333,7 +333,7 @@ class PresentationAssembler:
         tl = st.timeline
         for t in tl.tracks:
             if t.kind is TrackKind.AUDIO:
-                for c in [c for c in t.clips if c.scene_id in scene_ids and c.audio.get("role") == "SFX" and is_p5(c) and c.created_by == Creator.AI.value and not c.locked]:
+                for c in [c for c in t.clips if c.scene_id in scene_ids and c.audio.get("role") == "SFX" and is_p5(c) and c.created_by == Creator.AI.value and not c.protected]:
                     t.clips.remove(c)
         for sid in scene_ids:
             self._drop_ai_decisions_any(sid, {PresentationType.SFX})

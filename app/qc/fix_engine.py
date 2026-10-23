@@ -141,7 +141,7 @@ def _protection(project: Project, track: Track | None, clip: Clip) -> str:
     """Why QC must not touch this element ("" = it may). QC reports such elements but NEVER modifies them."""
     if track is not None and track.locked:
         return f"Track “{track.name}” is locked: QC does not change it."
-    if clip.locked:
+    if clip.protected:
         return "This element is locked by you: QC does not change it."
     owner = _owner(clip.created_by)
     role = str((clip.audio or {}).get("role") or "").upper()

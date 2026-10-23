@@ -66,3 +66,26 @@ def value_at(keyframes: list[Keyframe], prop: str, t: float, default: float | No
             u = 1.0 if span <= 1e-9 else (t - a.time) / span
             return a.value + (b.value - a.value) * ease(a.interpolation, u)
     return pts[-1].value
+
+
+def window_keyframes(kfs: list[Keyframe], t0: float, t1: float) -> list[Keyframe]:
+    """The keyframes seen through the window [t0, t1] of a clip's local time, re-based so the window starts at 0 (used by trim and split).
+
+    Policy (documented project behaviour): keyframes inside the window are kept; where a property had keyframes that were cut away, a boundary keyframe holding the
+    interpolated value is inserted at the window edge(s) so the picture does not jump; properties whose keyframes all lie outside keep a single boundary keyframe
+    (their value there). Keyframes keep their interpolation and owning decision."""
+    out: list[Keyframe] = []
+    eps = 1e-6
+    for prop in sorted({k.property for k in kfs}):
+        mine = sorted((k for k in kfs if k.property == prop), key=lambda k: k.time)
+        inside = [k for k in mine if t0 - eps <= k.time <= t1 + eps]
+        first_cut = bool(mine) and mine[0].time < t0 - eps
+        last_cut = bool(mine) and mine[-1].time > t1 + eps
+        if first_cut or not inside:
+            interp = next((k.interpolation for k in reversed(mine) if k.time <= t0), mine[0].interpolation)
+            if not inside or inside[0].time > t0 + eps:
+                out.append(Keyframe(prop, 0.0, value_at(mine, prop, t0), interp, ""))
+        out += [Keyframe(k.property, max(0.0, k.time - t0), k.value, k.interpolation, k.decision_id) for k in inside]
+        if last_cut and (not inside or inside[-1].time < t1 - eps):
+            out.append(Keyframe(prop, t1 - t0, value_at(mine, prop, t1), inside[-1].interpolation if inside else mine[0].interpolation, ""))
+    return out

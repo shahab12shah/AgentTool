@@ -10,6 +10,9 @@ from app.timeline.index import CLIP_WATCHED, bump
 from app.timeline.keyframes import Keyframe
 
 KIND_MEDIA, KIND_TEXT, KIND_GRAPHIC, KIND_CAPTION = "media", "text", "graphic", "caption"
+# User edit locks (Phase 10). ``item`` locks the whole timeline item; the others lock one aspect. A lock stops MANUAL edits of that aspect and, because the clip then counts as
+# ``protected``, AI regeneration leaves the clip alone too. (``locked`` is the older "protect from AI regeneration" switch and does not stop manual edits.)
+LOCK_KINDS = ("item", "position", "timing", "transform", "audio", "style")
 
 
 @dataclass
@@ -40,6 +43,10 @@ class Clip:
     audio: dict[str, Any] = field(default_factory=dict)
     transition: dict[str, Any] | None = None  # transition INTO this clip
     metadata: dict[str, Any] = field(default_factory=dict)
+    # --- Phase 10: relationships and user locks ---
+    link_id: str = ""  # clips sharing a link_id stay in sync when moved / trimmed / split / deleted (e.g. a picture and its production audio)
+    group_id: str = ""  # clips sharing a group_id are selected and moved together; trims and splits stay independent
+    locks: frozenset[str] = frozenset()  # subset of LOCK_KINDS
 
     def __setattr__(self, name: str, value: Any) -> None:
         object.__setattr__(self, name, value)
@@ -49,6 +56,11 @@ class Clip:
     @property
     def timeline_end(self) -> float:
         return self.timeline_start + self.duration
+
+    @property
+    def protected(self) -> bool:
+        """True when AI regeneration must leave this clip alone: the legacy ``locked`` switch or any user edit lock."""
+        return self.locked or bool(self.locks)
 
     def snapshot(self) -> "Clip":
         c = copy.copy(self)
@@ -84,6 +96,12 @@ class Clip:
             d["text"] = copy.deepcopy(self.text)
         if self.transition is not None:
             d["transition"] = copy.deepcopy(self.transition)
+        if self.link_id:
+            d["link_id"] = self.link_id
+        if self.group_id:
+            d["group_id"] = self.group_id
+        if self.locks:
+            d["locks"] = sorted(self.locks)
         return d
 
     @classmethod
@@ -109,4 +127,6 @@ class Clip:
             animation=dict(d.get("animation") or {}), audio=dict(d.get("audio") or {}),
             transition=copy.deepcopy(d["transition"]) if d.get("transition") is not None else None,
             metadata=dict(d.get("metadata") or {}),
+            link_id=str(d.get("link_id", "")), group_id=str(d.get("group_id", "")),
+            locks=frozenset(str(k) for k in (d.get("locks") or ()) if k in LOCK_KINDS),
         )

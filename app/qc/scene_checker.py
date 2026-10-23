@@ -328,7 +328,7 @@ class SceneChecker(BaseChecker):
         title, why, suggested, impact = INFO["scene.visual.not_on_timeline"]
         asset = ctx.asset(a.asset_id)
         shown = sorted({_name(ctx, c) for _t, c in inside})
-        replaced_by_user = bool(inside) and not short_of_ratio and all(str(c.created_by).upper() == "USER" or c.locked for _t, c in inside)
+        replaced_by_user = bool(inside) and not short_of_ratio and all(str(c.created_by).upper() == "USER" or c.protected for _t, c in inside)
         sev = N if replaced_by_user else E  # a picture you placed yourself instead of the approved one is your decision, not a defect
         what = f"The approved visual {asset.name if asset else a.asset_id} is not on the timeline in scene {s.label}; "
         if inside:

@@ -125,7 +125,7 @@ class TimelineValidator:
             if st is None or st.status.value != "COMPLETE" or not self.strategy.segments.get(sc.id):
                 continue
             clips = [c for t in timeline.tracks if t.id in VISUAL_TRACKS for c in t.clips if c.scene_id == sc.id and c.kind == "media"]
-            owned_by_user = any(c.created_by == "USER" or c.locked for c in clips)
+            owned_by_user = any(c.created_by == "USER" or c.protected for c in clips)
             cursor, gap = sc.start, 0.0
             for c in sorted(clips, key=lambda x: x.timeline_start):
                 if c.timeline_start - cursor > EPS:

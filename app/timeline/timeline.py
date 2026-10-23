@@ -15,6 +15,7 @@ from app.core.constants import MIN_CLIP_DURATION, TIME_EPSILON
 from app.core.exceptions import TimelineError
 from app.timeline.clip import Clip
 from app.timeline.index import TimelineIndex, bump, epoch, watched
+from app.timeline.markers import Marker
 from app.timeline.track import Track, TrackKind
 
 DEFAULT_TRACKS: tuple[tuple[str, str, TrackKind], ...] = (
@@ -55,6 +56,8 @@ class Timeline:
         self._ix: TimelineIndex | None = None
         self._seen = (-1, 0)
         self.tracks: list[Track] = tracks if tracks is not None else []
+        self.markers: list[Marker] = []  # sorted by time
+        self.range: tuple[float, float] | None = None  # the marked in / out range (seconds), or None
 
     def __setattr__(self, name: str, value: object) -> None:
         if name == "tracks":
@@ -299,10 +302,46 @@ class Timeline:
             self.detach_clip(state.id)
         self.insert_clip(state.snapshot())
 
+    # ----- markers / range (raw mutators; commands validate) -----
+    def get_marker(self, marker_id: str) -> Marker | None:
+        return next((m for m in self.markers if m.id == marker_id), None)
+
+    def insert_marker(self, marker: Marker) -> None:
+        self.markers.append(marker)
+        self.markers.sort(key=lambda m: (m.time, m.id))
+        self.touch()
+
+    def remove_marker(self, marker_id: str) -> Marker | None:
+        m = self.get_marker(marker_id)
+        if m is not None:
+            self.markers.remove(m)
+            self.touch()
+        return m
+
+    def set_range(self, value: tuple[float, float] | None) -> None:
+        self.range = value
+        self.touch()
+
+    def next_marker(self, t: float) -> Marker | None:
+        return next((m for m in self.markers if m.time > t + TIME_EPSILON), None)
+
+    def prev_marker(self, t: float) -> Marker | None:
+        return next((m for m in reversed(self.markers) if m.time < t - TIME_EPSILON), None)
+
     # ----- persistence -----
     def to_dict(self) -> dict[str, Any]:
-        return {"tracks": [t.to_dict() for t in self.tracks]}
+        d: dict[str, Any] = {"tracks": [t.to_dict() for t in self.tracks]}
+        if self.markers:
+            d["markers"] = [m.to_dict() for m in self.markers]
+        if self.range is not None:
+            d["range"] = [self.range[0], self.range[1]]
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Timeline":
-        return cls([Track.from_dict(t) for t in d.get("tracks", [])])
+        tl = cls([Track.from_dict(t) for t in d.get("tracks", [])])
+        tl.markers = sorted((Marker.from_dict(m) for m in d.get("markers", []) if isinstance(m, dict) and "id" in m and "time" in m), key=lambda m: (m.time, m.id))
+        r = d.get("range")
+        if isinstance(r, (list, tuple)) and len(r) == 2 and float(r[1]) > float(r[0]) >= 0:
+            tl.range = (float(r[0]), float(r[1]))
+        return tl

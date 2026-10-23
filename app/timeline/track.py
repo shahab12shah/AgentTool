@@ -30,6 +30,8 @@ class Track:
     locked: bool = False
     solo: bool = False
     volume: float = 1.0  # audio tracks: track gain
+    height: int = 0  # row height in pixels (0 = the default); a UI preference stored with the track
+    collapsed: bool = False  # drawn as a thin strip
     clips: list[Clip] = field(default_factory=list)
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -64,6 +66,8 @@ class Track:
             "locked": self.locked,
             **({"solo": True} if self.solo else {}),
             **({"volume": self.volume} if abs(self.volume - 1.0) > 1e-9 else {}),
+            **({"height": self.height} if self.height else {}),
+            **({"collapsed": True} if self.collapsed else {}),
             "clips": [c.to_dict() for c in self.clips],
         }
 
@@ -78,6 +82,8 @@ class Track:
             locked=bool(d.get("locked", False)),
             solo=bool(d.get("solo", False)),
             volume=float(d.get("volume", 1.0)),
+            height=max(0, int(d.get("height", 0) or 0)),
+            collapsed=bool(d.get("collapsed", False)),
             clips=[Clip.from_dict(c) for c in d.get("clips", [])],
         )
         track.sort()

@@ -223,6 +223,9 @@ def migrate_document(doc: dict[str, Any]) -> dict[str, Any]:
                            ("qc_cache", {}), ("render_qc_results", {})):
             doc.setdefault(key, empty)
         doc["schema_version"] = 8
+        version = 8
+    if version == 8:  # Phase 8 -> Phase 10: timeline markers / range, clip links / groups / locks and track display fields are optional keys of the timeline: nothing to add
+        doc["schema_version"] = 9
     return doc
 
 
