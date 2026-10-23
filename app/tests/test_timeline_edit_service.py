@@ -185,7 +185,7 @@ def test_split_at_playhead_keeps_source_mapping_and_is_one_step(ews):
 
 def test_blade_cuts_every_unlocked_track_under_the_cursor_when_no_track_given(ews):
     lay(ews, 1)
-    a2 = ews.edit.place_assets([ews.aud.id], at=0.0)
+    ews.edit.place_assets([ews.aud.id], at=0.0)
     n = len(list(ews.project.timeline.all_clips()))
     ews.edit.blade(3.0)
     assert len(list(ews.project.timeline.all_clips())) == n + 2  # video and audio were cut together (one undo step)
