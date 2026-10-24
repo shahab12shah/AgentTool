@@ -270,6 +270,7 @@ class MainWindow(QMainWindow):
         self.qc_panel.search_again_requested.connect(self._qc_search_again)
         self.timeline_panel.qc_issue_requested.connect(self._qc_show_issue)
         self.timeline_panel.request_inspector.connect(self._show_in_inspector)
+        self.inspector.search_alternatives_requested.connect(self._research_scene)  # the AI-decision box: "Search alternatives" opens that scene's research
         self.timeline_panel.request_speed_dialog.connect(lambda cid: self._inspector_dialog("open_speed_dialog", cid, "The speed dialog"))
         self.timeline_panel.request_replace_dialog.connect(lambda cid: self._inspector_dialog("open_replace_dialog", cid, "The replace-media dialog"))
         self.timeline_panel.set_history_actions(self.undo_action, self.redo_action)
