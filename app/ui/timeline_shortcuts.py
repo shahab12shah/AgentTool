@@ -77,7 +77,7 @@ SPECS: tuple[ActionSpec, ...] = (
     _a("marker_next", "Next marker", G_PLAY, "Shift+M", "markers"),
     _a("tool_select", "Select tool", G_TOOLS, ("S", "V"), menu="Select tool"),
     _a("tool_blade", "Blade tool", G_TOOLS, "B", menu="Blade tool", tip="Click a clip to cut it; Shift+click cuts every unlocked track."),
-    _a("delete", "Delete", G_EDIT, ("Delete", "Backspace"), "delete_target", tip="Deletes the selected clips and leaves the gap (or the marker you point at / selected on the ruler)."),
+    _a("delete", "Delete", G_EDIT, ("Delete", "Backspace"), "delete_target", tip="Deletes the selected clips: the gap stays, or closes when Ripple is ON (or the marker you point at / selected on the ruler)."),
     _a("ripple_delete", "Ripple delete", G_EDIT, ("Shift+Delete", "Shift+Backspace"), "delete_target", tip="Deletes the selected clips and closes the gap."),
     _a("cut", "Cut", G_EDIT, "Ctrl+X", "selection", "unlocked"),
     _a("copy", "Copy", G_EDIT, "Ctrl+C", "selection"),
@@ -579,7 +579,7 @@ class TimelineShortcuts(QObject):
         if marker is not None:
             self.canvas.delete_marker(marker)
         else:
-            self.canvas.delete_selection(ripple=False)
+            self.canvas.delete_selection(ripple=None)  # follows the Ripple ON/OFF mode; Shift+Delete always ripples
 
     def _do_ripple_delete(self) -> None:
         marker = self._marker_to_delete()

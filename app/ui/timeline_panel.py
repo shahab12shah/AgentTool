@@ -861,7 +861,7 @@ class TimelinePanel(QWidget):
 
         # clip operations
         self.split_btn = self._button("Split", "Split at the playhead: the selected clips, or every clip under it when nothing is selected.", action="split", name="tlSplit")
-        self.delete_btn = self._button("Delete", "Delete the selected clips (the gap stays).", action="delete", name="tlDelete")
+        self.delete_btn = self._button("Delete", "Delete the selected clips: the gap stays, or closes when Ripple is ON.", action="delete", name="tlDelete")
         self.ripple_delete_btn = self._button("Ripple delete", "Delete the selected clips and close the gap.", action="ripple_delete", name="tlRippleDelete")
         flow.addWidget(self._group(self.split_btn, self.delete_btn, self.ripple_delete_btn))
 

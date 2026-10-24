@@ -1973,7 +1973,7 @@ class TimelineCanvas(QWidget):
             if marker is not None:
                 self.delete_marker(marker)
             else:
-                self.delete_selection(ripple=shift)
+                self.delete_selection(ripple=True if shift else None)  # Shift = always ripple; otherwise the visible Ripple ON/OFF mode decides
             e.accept()
             return
         elif key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
@@ -2097,13 +2097,13 @@ class TimelineCanvas(QWidget):
     def split_at_playhead(self, ids: list[str] | None = None) -> bool:
         return self._edit(lambda: self._ws.edit.split(self.playhead, ids), modal=False)
 
-    def delete_selection(self, ripple: bool | None = False) -> bool:
+    def delete_selection(self, ripple: bool | None = None) -> bool:
         """Delete the selected clips (``ripple=True`` closes the gap, ``False`` leaves it, ``None`` follows the ripple mode)."""
         ids = self._need_selection()
         return ids is not None and self._edit(lambda: self._ws.edit.delete(ids, ripple=ripple))
 
     def delete_selected(self) -> bool:  # kept for the toolbar button and older callers
-        return self.delete_selection(ripple=False)
+        return self.delete_selection(ripple=None)
 
     def select_all(self) -> bool:
         tl = self._timeline()
