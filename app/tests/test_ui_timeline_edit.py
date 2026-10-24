@@ -876,6 +876,11 @@ def test_dropping_below_the_last_row_creates_a_track_of_the_right_kind_and_place
     assert ev.isAccepted() and len(env.tl.tracks) == n + 1
     new = env.tl.tracks[-1]
     assert new.kind is TrackKind.AUDIO and [(c.asset_id, c.timeline_start) for c in new.clips] == [(au.id, 3.0)]
+    env.ws.commands.undo()  # the new track AND its clip are one undo step
+    assert len(env.tl.tracks) == n and not [c for c in env.tl.all_clips() if c.asset_id == au.id]
+    env.ws.commands.redo()
+    assert len(env.tl.tracks) == n + 1
+    n += 1
     # a mixed drop that no single track can hold is refused before anything is created
     before = env.snapshot()
     below = QPoint(below.x(), env.canvas.content_height() + NEW_TRACK_STRIP_H // 2)  # the new track made the timeline taller
@@ -883,13 +888,13 @@ def test_dropping_below_the_last_row_creates_a_track_of_the_right_kind_and_place
     assert not ev.isAccepted() and env.snapshot() == before and any("same new track" in m for m in env.status)
 
 
-def test_a_failed_placement_on_a_new_track_takes_the_new_track_away_again(env, monkeypatch):
+def test_a_refused_placement_on_a_new_track_creates_no_track(env, monkeypatch):
     from app.core.exceptions import TimelineError
 
     v = env.asset("video", 4.0)
     env.done()
     n = len(env.tl.tracks)
-    monkeypatch.setattr(env.ws.edit, "place_assets", lambda *a, **k: (_ for _ in ()).throw(TimelineError("placement refused")))
+    monkeypatch.setattr(env.ws.edit, "_assets_plan", lambda *a, **k: (_ for _ in ()).throw(TimelineError("placement refused")))  # the placement fails after the probe track exists
     below = QPoint(100, env.canvas.content_height() + 6)
     ev, _md = drop(env, [v.id], below)
     assert not ev.isAccepted() and len(env.tl.tracks) == n and not env.ws.commands.can_undo

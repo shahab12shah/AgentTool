@@ -17,7 +17,7 @@ from app.core.constants import DEFAULT_IMAGE_DURATION
 from app.core.events import EventBus, Topics
 from app.core.exceptions import TimelineError
 from app.logging.logger import get_logger
-from app.media.asset import Asset
+from app.media.asset import Asset, AssetType
 from app.project.project import Project
 from app.project.project_manager import ProjectManager
 from app.timeline import meta_commands as mc
@@ -279,14 +279,7 @@ class TimelineEditService:
     def default_track(self, asset: Asset) -> Track:
         return self._legacy.default_track_for(asset)
 
-    def place_assets(self, asset_ids: Iterable[str], at: float | None = None, track_id: str | None = None, *, mode: str = "free") -> EditPlan | None:
-        """Put library media on the timeline. ``mode``: ``free`` (first free spot on the track, nothing moves) | ``insert`` (ripple: later clips move right) | ``overwrite``."""
-        asset_ids = list(asset_ids)
-        if not asset_ids:
-            return None
-        project, tl = self._project(), self.timeline
-        at = self.playhead if at is None else at
-        track = tl.get_track(track_id) if track_id else self.default_track(project.assets.require(asset_ids[0]))
+    def _assets_plan(self, asset_ids: list[str], at: float, track: Track, mode: str) -> EditPlan:
         clips = self.clips_for_assets(asset_ids, track, at)
         env = self.env()
         if mode == "insert":
@@ -296,7 +289,42 @@ class TimelineEditService:
         else:
             plan = ob.plan_insert_free(env, clips, at, track.id)
         plan.description = "Add media" if mode == "free" else f"{mode.title()} media"
-        return self.run(plan)
+        return plan
+
+    def place_assets(self, asset_ids: Iterable[str], at: float | None = None, track_id: str | None = None, *, mode: str = "free") -> EditPlan | None:
+        """Put library media on the timeline. ``mode``: ``free`` (first free spot on the track, nothing moves) | ``insert`` (ripple: later clips move right) | ``overwrite``."""
+        asset_ids = list(asset_ids)
+        if not asset_ids:
+            return None
+        project, tl = self._project(), self.timeline
+        at = self.playhead if at is None else at
+        track = tl.get_track(track_id) if track_id else self.default_track(project.assets.require(asset_ids[0]))
+        return self.run(self._assets_plan(asset_ids, at, track, mode))
+
+    def place_assets_on_new_track(self, asset_ids: Iterable[str], at: float | None = None, *, mode: str = "free") -> Track:
+        """Create a track of the right kind for the first asset AND put the media on it as ONE undo step (dropping media under the last row). If the placement is refused nothing
+        is created. Returns the new track."""
+        asset_ids = list(asset_ids)
+        if not asset_ids:
+            raise TimelineError("There is no media to add.")
+        from app.timeline.timeline_commands import AddTrackCommand  # noqa: PLC0415
+
+        project, tl = self._project(), self.timeline
+        first = project.assets.require(asset_ids[0])
+        kind = {AssetType.AUDIO: TrackKind.AUDIO, AssetType.IMAGE: TrackKind.IMAGE}.get(first.type, TrackKind.VIDEO)
+        track, index = self._legacy.build_track(kind)
+        at = self.playhead if at is None else at
+        probe = AddTrackCommand(tl, track, index)
+        probe.do()  # present only while the plan is built and checked, so the planners and the validator see the new track ...
+        try:
+            plan = self._assets_plan(asset_ids, at, track, mode)
+            validate_plan(self.env(), plan)
+        finally:
+            probe.undo()
+        cmd = CompositeCommand("Add media on a new track", [AddTrackCommand(tl, track, index), PlanCommand(self.env(), plan)], scope="timeline")
+        self._commands.execute(cmd)  # ... and added for real, together with the clips, in one step
+        self.last_notes = list(plan.notes)
+        return track
 
     def replace_clip(self, clip_id: str, asset_id: str, *, keep_duration: bool = True) -> EditPlan | None:
         return self.run(ob.plan_replace(self.env(), clip_id, asset_id, keep_duration=keep_duration), own=[clip_id])

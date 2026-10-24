@@ -49,7 +49,8 @@ class TimelineService:
         return self._project().timeline
 
     # ----- tracks -----
-    def add_track(self, kind: TrackKind = TrackKind.VIDEO, name: str | None = None) -> Track:
+    def build_track(self, kind: TrackKind = TrackKind.VIDEO, name: str | None = None) -> tuple[Track, int]:
+        """A new track (not yet added) and the index it belongs at: video-like tracks sit above the audio tracks."""
         tl = self.timeline
         if name is None:
             if kind is TrackKind.AUDIO:
@@ -58,9 +59,12 @@ class TimelineService:
                 label = {TrackKind.IMAGE: "Images", TrackKind.GRAPHICS: "Graphics", TrackKind.TEXT: "Text"}.get(kind, "Video")
                 name = f"V{sum(not t.is_audio for t in tl.tracks) + 1} {label}"
         track = Track(new_track_id(), name, kind)
-        # keep video-like tracks above audio tracks
         index = len(tl.tracks) if kind is TrackKind.AUDIO else sum(not t.is_audio for t in tl.tracks)
-        self._commands.execute(AddTrackCommand(tl, track, index))
+        return track, index
+
+    def add_track(self, kind: TrackKind = TrackKind.VIDEO, name: str | None = None) -> Track:
+        track, index = self.build_track(kind, name)
+        self._commands.execute(AddTrackCommand(self.timeline, track, index))
         return track
 
     def remove_track(self, track_id: str) -> None:

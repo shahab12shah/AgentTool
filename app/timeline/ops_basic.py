@@ -601,6 +601,17 @@ def plan_split(env: PlanEnv, ids: list[str], at: float, *, linked: bool = True, 
                 skipped_locked += 1
                 continue
             extras.append(c.id)
+    if linked and extras:  # a blade on one track also cuts the linked partners (the picture's own audio) that span the cut
+        for rid in relatives(tl, list(extras), linked=True, grouped=False):
+            if rid in explicit or rid in extras:
+                continue
+            mate = tl.find_clip(rid)[1]
+            if not (mate.timeline_start + TIME_EPSILON < at < mate.timeline_end - TIME_EPSILON):
+                continue
+            if tl.get_track(mate.track_id).locked or _lock_problem(env, mate, ("timing",), "split"):
+                skipped_locked += 1
+                continue
+            extras.append(rid)
     if skipped_locked:
         notes.append(f"{_plural(skipped_locked)} on locked tracks or with locked timing {'was' if skipped_locked == 1 else 'were'} left unsplit.")
     targets = [tl.find_clip(i)[1] for i in [*explicit, *extras]]

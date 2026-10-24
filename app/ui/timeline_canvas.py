@@ -2530,16 +2530,5 @@ class TimelineCanvas(QWidget):
             e.ignore()
 
     def _drop_on_new_track(self, state: _DropState) -> bool:
-        """Create a track of the right kind, then place the media on it. If placing fails the new track is undone, so a failed drop changes nothing.
-        (Two undo steps when it succeeds: the engine has no combined 'new track + place' call.)"""
-        ws = self._ws
-        first = ws.project.assets.get(state.asset_ids[0])
-        kind = {AssetType.AUDIO: TrackKind.AUDIO, AssetType.IMAGE: TrackKind.IMAGE}.get(first.type, TrackKind.VIDEO)
-        box: list[Track] = []
-        if not self.ctx.guard(self, lambda: box.append(ws.edit.add_track(kind)), modal=True, title="Add track"):
-            return False
-        track = box[0]
-        if self._edit(lambda: ws.edit.place_assets(state.asset_ids, state.at, track.id, mode="free")):
-            return True
-        ws.commands.undo()  # the placement failed (the reason is in the status line): take the new track away again
-        return False
+        """Create a track of the right kind and place the media on it as one undo step; if the placement is refused nothing is created."""
+        return self._edit(lambda: self._ws.edit.place_assets_on_new_track(state.asset_ids, state.at, mode="free"))

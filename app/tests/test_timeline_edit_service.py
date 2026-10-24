@@ -72,6 +72,22 @@ def test_insert_mode_ripples_later_clips_right_and_overwrite_replaces(ews):
     assert [s[1:] for s in starts(ews)] == [(0.0, 6.0), (6.0, 4.0)]
 
 
+def test_placing_media_on_a_new_track_is_one_undo_step_and_a_refusal_creates_nothing(ews):
+    tl = ews.project.timeline
+    n = len(tl.tracks)
+    track = ews.edit.place_assets_on_new_track([ews.aud.id], at=1.0)
+    assert track.kind is TrackKind.AUDIO and len(tl.tracks) == n + 1 and [(c.asset_id, c.timeline_start) for c in tl.get_track(track.id).clips] == [(ews.aud.id, 1.0)]
+    ews.commands.undo()
+    assert len(tl.tracks) == n and not any(c.asset_id == ews.aud.id for c in tl.all_clips())
+    ews.commands.redo()
+    assert len(tl.tracks) == n + 1
+    ews.commands.undo()
+    before = state(ews)
+    with pytest.raises(TimelineError):
+        ews.edit.place_assets_on_new_track([ews.A[0].id, ews.aud.id], at=0.0)  # video and audio cannot share one new track
+    assert state(ews) == before
+
+
 def test_placing_media_on_a_track_that_cannot_hold_it_is_refused_and_changes_nothing(ews):
     audio_track = next(t for t in ews.project.timeline.tracks if t.kind is TrackKind.AUDIO)
     before = state(ews)
@@ -191,6 +207,26 @@ def test_blade_cuts_every_unlocked_track_under_the_cursor_when_no_track_given(ew
     assert len(list(ews.project.timeline.all_clips())) == n + 2  # video and audio were cut together (one undo step)
     ews.commands.undo()
     assert len(list(ews.project.timeline.all_clips())) == n
+
+
+def test_blade_on_one_track_also_cuts_the_linked_partner_on_another_track(ews):
+    a, *_ = lay(ews, 1)
+    ews.edit.place_assets([ews.aud.id], at=0.0)
+    audio_clip = next(c for c in ews.project.timeline.all_clips() if c.asset_id == ews.aud.id)
+    ews.edit.state.update(linked_selection=True)
+    ews.edit.link([a, audio_clip.id])
+    n = len(list(ews.project.timeline.all_clips()))
+    ews.edit.blade(2.0, ews.v1.id)  # only the video track is named
+    assert len(list(ews.project.timeline.all_clips())) == n + 2  # the audio was cut with it
+    right_audio = [c for c in ews.project.timeline.all_clips() if c.asset_id == ews.aud.id and c.timeline_start >= 2.0 - 1e-6]
+    right_video = [c for c in ews.project.timeline.all_clips() if c.asset_id == ews.A[0].id and c.timeline_start >= 2.0 - 1e-6]
+    assert len(right_audio) == 1 and len(right_video) == 1
+    assert right_audio[0].link_id and right_audio[0].link_id == right_video[0].link_id  # the new halves are linked to each other (a fresh link id)
+    ews.commands.undo()
+    assert len(list(ews.project.timeline.all_clips())) == n
+    ews.edit.state.update(linked_selection=False)
+    ews.edit.blade(2.0, ews.v1.id)  # linked editing off: only the named track is cut
+    assert len(list(ews.project.timeline.all_clips())) == n + 1
 
 
 def test_split_never_creates_a_zero_length_piece(ews):
