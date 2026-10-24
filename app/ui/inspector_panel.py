@@ -11,8 +11,9 @@ are shown (a mixed value reads as an em dash) and one edit changes all of them i
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from html import escape as _esc_html
-from typing import Any, Callable
+from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -729,7 +730,7 @@ class InspectorPanel(QWidget):
     def _typed_speed(self) -> float:
         try:
             return self.speed.valueFromText(self.speed.lineEdit().text())
-        except Exception:  # noqa: BLE001
+        except Exception:
             return self.speed.model_value()
 
     def _update_speed_result(self, speed: float) -> None:
@@ -1208,7 +1209,7 @@ class InspectorPanel(QWidget):
             return
 
         def run() -> None:
-            from app.timeline import ops_props as op  # noqa: PLC0415
+            from app.timeline import ops_props as op
 
             env, merged = ws.edit.env(), None
             for cid in ids:

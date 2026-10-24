@@ -12,21 +12,25 @@ import pytest
 from app.tests.conftest import import_and_wait, needs_ffmpeg
 
 pytest.importorskip("PySide6")
-from PySide6.QtCore import QPoint, QPointF, Qt  # noqa: E402
-from PySide6.QtGui import QWheelEvent  # noqa: E402
-from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QMessageBox
 
-from app.timeline.keyframes import INTERPOLATIONS  # noqa: E402
-from app.timeline.ops_props import KEYFRAME_RANGES, TRANSITION_TYPES, keyframe_properties  # noqa: E402
-from app.timeline.timebase import Timebase  # noqa: E402
-from app.ui.context import UiContext  # noqa: E402
-from app.ui.dialogs import replace_media_dialog, speed_dialog  # noqa: E402
-from app.ui.dialogs.replace_media_dialog import ReplaceMediaDialog  # noqa: E402
-from app.ui.dialogs.speed_dialog import SpeedChoiceDialog, SpeedDialog  # noqa: E402
-from app.ui.inspector_panel import InspectorPanel  # noqa: E402
-from app.ui.qt_bridge import UiBridge  # noqa: E402
-from app.ui.timecode_edit import NumberEdit, TimecodeEdit  # noqa: E402
+from app.timeline.keyframes import INTERPOLATIONS
+from app.timeline.ops_props import (
+    KEYFRAME_RANGES,
+    TRANSITION_TYPES,
+    keyframe_properties,
+)
+from app.timeline.timebase import Timebase
+from app.ui.context import UiContext
+from app.ui.dialogs import replace_media_dialog, speed_dialog
+from app.ui.dialogs.replace_media_dialog import ReplaceMediaDialog
+from app.ui.dialogs.speed_dialog import SpeedChoiceDialog, SpeedDialog
+from app.ui.inspector_panel import InspectorPanel
+from app.ui.qt_bridge import UiBridge
+from app.ui.timecode_edit import NumberEdit, TimecodeEdit
 
 pytestmark = needs_ffmpeg
 

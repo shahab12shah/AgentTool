@@ -22,7 +22,6 @@ from PySide6.QtWidgets import QApplication, QDialog, QMenu, QScrollArea  # noqa:
 
 from app.core.events import Topics  # noqa: E402
 from app.media.asset import Asset, AssetType, SourceType  # noqa: E402
-from app.tests.test_ui_acceptance import wait_ms  # noqa: E402
 from app.timeline.clip import KIND_CAPTION, Clip  # noqa: E402
 from app.timeline.keyframes import Keyframe  # noqa: E402
 from app.timeline.timeline import new_clip_id  # noqa: E402
@@ -191,6 +190,21 @@ def test_click_ctrl_shift_selection_and_clearing(env):
     env.click(env.at(40.0, V1))  # empty space clears
     assert env.selected() == []
     assert env.snapshot() and not env.ws.commands.can_undo  # selecting never edits
+
+
+def test_double_clicking_a_media_clip_still_emits_the_preview_signal_and_ctrl_shift_adds_a_range(env):
+    asset = env.asset("video", 30.0)
+    a, b, c = (env.clip(V1, s, 2.0, asset) for s in (0.0, 3.0, 6.0))
+    cap = env.clip("track_v6", 0.0, 2.0, asset, kind=KIND_CAPTION, text={"text": "hi"})
+    env.done()
+    got = []
+    env.canvas.clip_double_clicked.connect(got.append)
+    QTest.mouseDClick(env.canvas, LEFT, NO, env.pos(b.id))
+    QTest.mouseDClick(env.canvas, LEFT, NO, env.pos(cap.id))
+    assert got == [asset.id]  # a caption has no source media to preview
+    env.click(env.pos(a.id))
+    env.click(env.pos(c.id), CTRL | SHIFT)  # Ctrl+Shift: the range joins the existing selection
+    assert set(env.selected()) == {a.id, b.id, c.id}
 
 
 def test_clicking_a_linked_clip_selects_its_relatives_unless_linked_selection_is_off(env):
@@ -413,7 +427,8 @@ def test_vertical_movement_is_ignored_and_explained_when_a_clip_does_not_fit_the
 
 
 def test_an_invalid_drop_position_draws_red_commits_nothing_and_says_why(env):
-    a, b = env.clip(V1, 1.0, 2.0), env.clip(V1, 5.0, 2.0)
+    a = env.clip(V1, 1.0, 2.0)
+    env.clip(V1, 5.0, 2.0)  # the clip it would land on
     env.done()
     env.ws.edit_state.update(snap=env.ws.edit_state.snap.replace(enabled=False))
     before = env.snapshot()
@@ -642,9 +657,9 @@ def test_slide_gesture_moves_the_clip_and_its_neighbours_absorb_it(env):
 
 # ------------------------------------------------------------------------------------------------------------------------ 4. blade
 def test_blade_tool_cuts_the_hovered_track_and_its_linked_clip(env):
-    v = env.clip(V1, 0.0, 6.0, link_id="link_b")
-    au = env.clip(A1, 0.0, 6.0, link_id="link_b")
-    other = env.clip(V2, 0.0, 6.0)
+    env.clip(V1, 0.0, 6.0, link_id="link_b")
+    env.clip(A1, 0.0, 6.0, link_id="link_b")
+    env.clip(V2, 0.0, 6.0)
     env.done()
     env.ws.edit_state.update(tool="blade", snap=env.ws.edit_state.snap.replace(enabled=False))
     assert env.canvas.cursor().shape() == Qt.CursorShape.CrossCursor
@@ -662,11 +677,11 @@ def test_blade_tool_cuts_the_hovered_track_and_its_linked_clip(env):
     env.click(p, SHIFT)
     assert len(env.tl.get_track(V1).clips) == 2 and len(env.tl.get_track(V2).clips) == 2 and len(env.tl.get_track(A1).clips) == 2
     env.ws.commands.undo()
-    assert other.id and env.ws.commands.can_undo is False
+    assert env.ws.commands.can_undo is False and len(env.tl.get_track(V2).clips) == 1
 
 
 def test_blade_never_creates_a_zero_length_piece(env):
-    a = env.clip(V1, 2.0, 4.0)
+    env.clip(V1, 2.0, 4.0)
     env.done()
     env.ws.edit_state.update(tool="blade", snap=env.ws.edit_state.snap.replace(enabled=False))
     before = env.snapshot()
@@ -679,7 +694,7 @@ def test_blade_never_creates_a_zero_length_piece(env):
 
 
 def test_blade_snaps_to_the_playhead_and_the_tool_resets_the_cursor(env):
-    a = env.clip(V1, 0.0, 6.0)
+    env.clip(V1, 0.0, 6.0)
     env.done()
     env.ws.edit_state.update(tool="blade")
     env.canvas.set_playhead(3.0)
@@ -689,7 +704,6 @@ def test_blade_snaps_to_the_playhead_and_the_tool_resets_the_cursor(env):
     assert env.starts(V1)[0] == (0.0, 3.0)
     env.ws.edit_state.update(tool="select")
     assert env.canvas.cursor().shape() == Qt.CursorShape.ArrowCursor and env.canvas._blade is None
-    assert a.id
 
 
 def test_begin_blade_at_playhead_cuts_every_unlocked_track(env):
@@ -794,7 +808,7 @@ def test_dropping_one_asset_places_it_in_one_undo_step_and_several_lay_end_to_en
 
 
 def test_drop_modes_free_insert_and_overwrite(env):
-    base = env.clip(V1, 0.0, 10.0)
+    env.clip(V1, 0.0, 10.0)
     new = env.asset("video", 4.0)
     env.done()
     before = env.snapshot()
@@ -810,7 +824,6 @@ def test_drop_modes_free_insert_and_overwrite(env):
     drop(env, [new.id], env.at(3.0, V1), SHIFT)
     assert env.starts(V1) == [(0.0, 3.0), (3.0, 4.0), (7.0, 3.0)]
     env.undo_once_restores(before)
-    assert base.id
 
 
 def test_a_drop_that_cannot_work_adds_nothing_and_says_why(env):

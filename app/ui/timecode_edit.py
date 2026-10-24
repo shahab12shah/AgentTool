@@ -93,7 +93,7 @@ class TimecodeEdit(QLineEdit):
         if message:
             self.setToolTip(message)
 
-    def keyPressEvent(self, event) -> None:  # noqa: N802
+    def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape and self.is_editing():
             self.discard_edit()  # Escape throws an uncommitted edit away
             event.accept()
@@ -192,7 +192,7 @@ class NumberEdit(QDoubleSpinBox):
         a, b = self._lo * self._factor, self._hi * self._factor
         return min(a, b), max(a, b)
 
-    def stepBy(self, steps: int) -> None:  # noqa: N802  (arrows / wheel / page keys stop at the engine's limits; typed values are never clamped)
+    def stepBy(self, steps: int) -> None:
         lo, hi = self._display_limits()
         cur = self.value()
         new = min(max(cur + steps * self.singleStep(), lo), hi)
@@ -203,22 +203,22 @@ class NumberEdit(QDoubleSpinBox):
             self.lineEdit().setModified(True)  # a stepped value is an edit in progress until the field is left
             self.lineEdit().selectAll()
 
-    def wheelEvent(self, event) -> None:  # noqa: N802
+    def wheelEvent(self, event) -> None:
         if self.hasFocus():
             super().wheelEvent(event)
         else:
             event.ignore()
 
     # ------------------------------------------------------------------ mixed values
-    def textFromValue(self, value: float) -> str:  # noqa: N802
+    def textFromValue(self, value: float) -> str:
         return MIXED if self._mixed else super().textFromValue(value)
 
-    def valueFromText(self, text: str) -> float:  # noqa: N802
+    def valueFromText(self, text: str) -> float:
         if self._mixed and text.replace(self.suffix(), "").strip() in (MIXED, "-", ""):
             return self.value()
         return super().valueFromText(text)
 
-    def validate(self, text: str, pos: int):  # noqa: A003
+    def validate(self, text: str, pos: int):
         if self._mixed and text.replace(self.suffix(), "").strip() in (MIXED, ""):
             return QValidator.State.Acceptable, text, pos
         return super().validate(text, pos)
@@ -276,7 +276,7 @@ class NumberEdit(QDoubleSpinBox):
         else:
             self._refresh_tip()
 
-    def keyPressEvent(self, event) -> None:  # noqa: N802
+    def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape and self.is_editing():
             self.discard_edit()  # Escape throws an uncommitted edit away
             event.accept()
@@ -287,7 +287,7 @@ class NumberEdit(QDoubleSpinBox):
         self._mixed = self._mixed and self.lineEdit().text().strip() in (MIXED, "")
         try:
             v = self.valueFromText(self.lineEdit().text())
-        except Exception:  # noqa: BLE001
+        except Exception:
             self._flag(f"{self._label} must be a number.")
             return
         lo, hi = self._display_limits()

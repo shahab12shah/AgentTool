@@ -7,7 +7,16 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from app.media.asset import Asset, AssetType
 from app.ui.context import UiContext
@@ -22,7 +31,7 @@ def compatible_assets(ctx: UiContext, clip_id: str) -> list[Asset]:
         return []
     try:
         track, clip = project.timeline.find_clip(clip_id)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return []
     want = {AssetType.AUDIO} if track.is_audio else {AssetType.VIDEO, AssetType.IMAGE}
     return sorted((a for a in project.assets.all() if a.type in want and a.id != clip.asset_id), key=lambda a: (a.type.value, a.name.lower()))

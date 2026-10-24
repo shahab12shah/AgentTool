@@ -7,11 +7,21 @@ drag previews in memory and moves the keyframes on release = one undo step). Whi
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import QComboBox, QFormLayout, QHBoxLayout, QLabel, QMenu, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from app.core.exceptions import AppError
 from app.timeline.clip import Clip
@@ -188,7 +198,7 @@ class KeyframeLane(QWidget):
         return min(max(self._tb.snap(t), 0.0), self._duration)
 
     # ------------------------------------------------------------------ painting
-    def paintEvent(self, _event) -> None:  # noqa: N802
+    def paintEvent(self, _event) -> None:
         c = palette(self.theme)
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -256,7 +266,7 @@ class KeyframeLane(QWidget):
         return f"{v * f:.{min(dec, 2)}f}{suffix.strip()}"
 
     # ------------------------------------------------------------------ mouse
-    def mousePressEvent(self, e: QMouseEvent) -> None:  # noqa: N802
+    def mousePressEvent(self, e: QMouseEvent) -> None:
         self.setFocus()
         if e.button() != Qt.MouseButton.LeftButton:
             return
@@ -285,7 +295,7 @@ class KeyframeLane(QWidget):
                           "base": set(self._sel) if extend else set()}
         self.update()
 
-    def mouseMoveEvent(self, e: QMouseEvent) -> None:  # noqa: N802
+    def mouseMoveEvent(self, e: QMouseEvent) -> None:
         d = self._drag
         if d is None:
             return
@@ -313,7 +323,7 @@ class KeyframeLane(QWidget):
             self._sel = set(d["base"]) | set(inside)
         self.update()
 
-    def mouseReleaseEvent(self, e: QMouseEvent) -> None:  # noqa: N802
+    def mouseReleaseEvent(self, e: QMouseEvent) -> None:
         d, self._drag = self._drag, None
         live, self._live = self._live, None
         band, self._band = self._band, None
@@ -340,7 +350,7 @@ class KeyframeLane(QWidget):
             return
         self.add_requested.emit(self.snap_time(self.t_of(pos.x()), d["alt"]), self.v_of(pos.y()))
 
-    def keyPressEvent(self, e: QKeyEvent) -> None:  # noqa: N802
+    def keyPressEvent(self, e: QKeyEvent) -> None:
         if e.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             if not self.read_only:
                 self.delete_requested.emit()
@@ -394,7 +404,7 @@ class KeyframeLane(QWidget):
         delete.triggered.connect(lambda _=False: self.delete_requested.emit())
         return menu
 
-    def contextMenuEvent(self, e) -> None:  # noqa: N802
+    def contextMenuEvent(self, e) -> None:
         self.build_menu(e.pos()).exec(e.globalPos())
 
 

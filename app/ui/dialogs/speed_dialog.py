@@ -6,9 +6,16 @@ into a question and retries with the chosen ``link_policy``. Nothing here change
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from app.core.exceptions import AppError
 from app.timeline.ops_props import LINK_POLICIES, SpeedChoiceRequired
@@ -67,7 +74,9 @@ def choose_link_policy(parent: QWidget | None, exc: SpeedChoiceRequired, labels:
 def apply_speed(ctx: UiContext, parent: QWidget | None, clip_ids: Sequence[str], speed: float) -> tuple[bool, str]:
     """Change the speed of one clip (``ws.edit.set_speed``) or of several compatible clips (ONE undo step). Returns (done, message): ``message`` is the engine's reason when
     refused, or "" when it worked or the user cancelled the linked-clip question."""
-    from app.timeline import ops_props as op  # noqa: PLC0415  (planning is the engine's; only used to build ONE plan for several clips)
+    from app.timeline import (
+        ops_props as op,
+    )
 
     ws = ctx.ws
     ids = list(dict.fromkeys(clip_ids))
@@ -101,7 +110,7 @@ def apply_speed(ctx: UiContext, parent: QWidget | None, clip_ids: Sequence[str],
         ws.edit.run(merged, own=ids)
 
     def raise_empty() -> None:
-        from app.core.exceptions import TimelineError  # noqa: PLC0415
+        from app.core.exceptions import TimelineError
 
         raise TimelineError("Nothing changed: the clips already play at that speed.")
 
