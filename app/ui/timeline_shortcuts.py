@@ -65,6 +65,7 @@ def _a(id_: str, label: str, group: str, defaults: str | tuple[str, ...], *need:
 G_PLAY, G_TOOLS, G_EDIT, G_SEL, G_MARK, G_MODE, G_VIEW = "Playback and navigation", "Tools", "Editing", "Selection", "Markers and range", "Modes", "View and zoom"
 SPECS: tuple[ActionSpec, ...] = (
     _a("play_pause", "Play / pause", G_PLAY, "Space", "duration", tip="Advances the playhead in real time. The timeline has no audio output."),
+    _a("play_range", "Play in / out range", G_PLAY, "Shift+Space", "range_play", tip="Plays from the start of the in / out range to its end (no audio output)."),
     _a("go_start", "Go to start", G_PLAY, "Home", "project"),
     _a("go_end", "Go to end", G_PLAY, "End", "project"),
     _a("frame_prev", "Previous frame", G_PLAY, "Left", "project", repeat=True),
@@ -125,7 +126,7 @@ MENU_LAYOUT: tuple = (
     ("sub", "Zoom", ("zoom_in", "zoom_out", "zoom_fit", "zoom_selection")),
     ("sub", "Nudge selection", ("nudge_left", "nudge_right", "nudge_left_10", "nudge_right_10")), "-",
     "toggle_snap", "toggle_ripple", "toggle_link", "-",
-    "play_pause", "-",
+    "play_pause", "play_range", "-",
     ("dialog", "Keyboard Shortcuts…"),
 )
 
@@ -181,6 +182,7 @@ _NEEDS: dict[str, Callable[[_State], str | None]] = {
     "attrs": lambda s: None if s.attrs else "There are no copied attributes: use “Copy attributes” on a clip first.",
     "delete_target": lambda s: None if s.marker_target else (_NEEDS["selection"](s) or _NEEDS["unlocked"](s)),
     "range": lambda s: None if s.has_range else "There is no in / out range to clear.",
+    "range_play": lambda s: (None if s.has_range else "There is no in / out range to play. Set one with I and O.") if s.duration > 0 else "The timeline is empty.",
     "markers": lambda s: None if s.markers else "There are no markers on the timeline.",
 }
 
@@ -537,6 +539,9 @@ class TimelineShortcuts(QObject):
 
     def _do_play_pause(self) -> None:
         self.panel.toggle_playback()
+
+    def _do_play_range(self) -> None:
+        self.panel.play_range()
 
     def _do_go_start(self) -> None:
         self.canvas.jump_to_start()

@@ -1499,6 +1499,29 @@ def test_space_plays_with_a_fake_clock_frame_accurately_and_stops_at_the_end(e):
     assert not p.transport.playing
 
 
+def test_shift_space_plays_only_the_in_out_range(e):
+    p, c = e.panel, e.panel.canvas
+    lay(e, 1)  # 6 s
+    now = [50.0]
+    p.transport.clock = lambda: now[0]
+    focus(c)
+    press(c, "Shift+Space")
+    assert not p.transport.playing and any("no in / out range" in m for m in e.status)  # without a range there is nothing to play
+    e.ws.edit.set_range(2.0, 4.0)
+    c.set_playhead(5.0)  # anywhere: range playback starts at the range start
+    press(c, "Shift+Space")
+    assert p.transport.playing and c.playhead == pytest.approx(2.0)
+    now[0] = 50.0 + 1.0
+    p.transport.tick()
+    assert c.playhead == pytest.approx(3.0) and p.transport.playing
+    now[0] = 50.0 + 2.5  # past the range end (but inside the timeline)
+    p.transport.tick()
+    assert c.playhead == pytest.approx(4.0) and not p.transport.playing and "end of the range" in e.status[-1]
+    press(c, "Space")  # plain Space still plays to the end of the timeline
+    assert p.transport.playing and p.transport._end is None
+    press(c, "Space")
+
+
 def test_playback_stops_on_manual_playhead_changes_edits_escape_and_leaving_the_page(e):
     p, c = e.panel, e.panel.canvas
     ids = lay(e, 2)

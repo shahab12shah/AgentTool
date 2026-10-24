@@ -160,12 +160,14 @@ class PlayheadTransport(QObject):
         self.playing = False
         self._t0 = 0.0  # wall clock when playing started
         self._p0 = 0.0  # playhead when playing started
+        self._end: float | None = None  # where playback stops when it is playing the in / out range (None = the end of the timeline)
         self._expected = 0.0  # where this transport last put the playhead (anything else moving it is a manual change)
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self.tick)
 
-    def start(self) -> None:
+    def start(self, play_range: bool = False) -> None:
+        """Play from the playhead to the end of the timeline, or (``play_range``) from the start of the in / out range to its end."""
         ws = self.panel.ctx.ws
         project = ws.project
         if project is None:
@@ -175,7 +177,14 @@ class PlayheadTransport(QObject):
             raise TimelineError("There is nothing to play: the timeline is empty.")
         tb = timebase_of(project)
         canvas = self.panel.canvas
-        if canvas.playhead >= duration - tb.frame_s * 0.5:  # at the end: play from the start
+        self._end = None
+        if play_range:
+            rng = project.timeline.range
+            if not rng:
+                raise TimelineError("There is no in / out range to play. Set one with I and O.")
+            self._move(rng[0])
+            self._end = min(rng[1], duration)
+        elif canvas.playhead >= duration - tb.frame_s * 0.5:  # at the end: play from the start
             self._move(0.0)
         self._p0, self._t0, self._expected = canvas.playhead, self.clock(), canvas.playhead
         self._timer.start(max(8, int(500.0 / max(1.0, tb.fps))))
@@ -209,10 +218,10 @@ class PlayheadTransport(QObject):
             self.stop()
             return
         target = self._p0 + (self.clock() - self._t0)
-        duration = project.timeline.duration
+        duration = project.timeline.duration if self._end is None else self._end
         if target >= duration - 1e-9:
             self._move(duration)
-            self.stop("Reached the end of the timeline.")
+            self.stop("Reached the end of the timeline." if self._end is None else "Reached the end of the range.")
             return
         t = timebase_of(project).snap(target, "floor")
         if abs(t - self._expected) > 1e-9:
@@ -1209,6 +1218,13 @@ QLabel#timelineModes {{ color: {c['muted']}; padding: 2px 8px; }}
     # ------------------------------------------------------------ playback
     def toggle_playback(self) -> None:
         self.transport.toggle()
+
+    def play_range(self) -> None:
+        """Play the in / out range (Shift+Space); pressing it again stops."""
+        if self.transport.playing:
+            self.transport.stop()
+        else:
+            self.transport.start(play_range=True)
 
     def stop_playback(self) -> None:
         self.transport.stop()
