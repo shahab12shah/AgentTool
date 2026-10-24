@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.core.constants import SCHEMA_VERSION
+
 import json
 
 import pytest
@@ -257,7 +259,7 @@ def test_schema_v8_round_trip_and_migration(proj):
     proj.qc_fixes = [FixRecord("f1", i.issue_id, i.code, "caption.retime", summary="moved")]
     proj.render_qc_results = {"render_1": {"status": "PASSED"}}
     doc = json.loads(json.dumps(proj.to_document()))
-    assert doc["schema_version"] == 8 and {"qc_settings", "qc_runs", "qc_issues", "qc_scores", "qc_ignored_issues", "qc_fixes", "qc_history", "render_qc_results"} <= set(doc)
+    assert doc["schema_version"] == SCHEMA_VERSION and {"qc_settings", "qc_runs", "qc_issues", "qc_scores", "qc_ignored_issues", "qc_fixes", "qc_history", "render_qc_results"} <= set(doc)
     q = Project.from_document(doc, root=proj.root)
     assert q.qc_issues[0].fix.kind == "caption.retime" and q.qc_runs[0]["run_id"] == res.run.run_id and q.qc_ignored_issues[0].reason == "keep" and q.render_qc_results["render_1"]["status"] == "PASSED"
     assert q.qc_scores.overall == res.run.scores.overall and q.qc_fixes[0].summary == "moved" and q.qc_history[0]["qc_run_id"] == res.run.run_id
@@ -266,7 +268,7 @@ def test_schema_v8_round_trip_and_migration(proj):
     for k in ("qc_settings", "qc_runs", "qc_issues", "qc_scores", "qc_ignored_issues", "qc_fixes", "qc_history", "qc_cache", "render_qc_results"):
         old.pop(k)
     m = Project.from_document(old, root=proj.root)
-    assert m.schema_version == 8 and m.qc_issues == [] and m.qc_scores is None and m.qc_settings.block_level == "CRITICAL_ERROR"
+    assert m.schema_version == SCHEMA_VERSION and m.qc_issues == [] and m.qc_scores is None and m.qc_settings.block_level == "CRITICAL_ERROR"
 
 
 def test_qc_commands_are_undoable_and_leave_the_timeline_alone(proj):

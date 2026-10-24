@@ -3,6 +3,8 @@ check, ignores (undoable, persistent), history comparison, the export gate, pers
 
 from __future__ import annotations
 
+from app.core.constants import SCHEMA_VERSION
+
 import json
 import threading
 import time
@@ -259,7 +261,7 @@ def test_settings_are_validated_undoable_and_saved_with_the_project(qws, tmp_pat
     root = ws.project.root
     ws.close_project()
     ws.open_project(root)
-    assert ws.project.schema_version == 8 and ws.project.qc_settings.block_level in ("CRITICAL", "CRITICAL_ERROR")
+    assert ws.project.schema_version == SCHEMA_VERSION and ws.project.qc_settings.block_level in ("CRITICAL", "CRITICAL_ERROR")
 
 
 def test_qc_history_issues_and_scores_survive_save_and_reopen(qws):
@@ -461,12 +463,12 @@ def test_a_document_saved_before_phase_8_opens_with_empty_qc_sections_and_saves_
     ws.close_project()
     ws.open_project(root)
     p = ws.project
-    assert p.schema_version == 8 and p.qc_issues == [] and p.qc_runs == [] and p.qc_scores is None and p.qc_history == [] and p.qc_cache == {} and p.qc_settings.block_level == "CRITICAL_ERROR"
+    assert p.schema_version == SCHEMA_VERSION and p.qc_issues == [] and p.qc_runs == [] and p.qc_scores is None and p.qc_history == [] and p.qc_cache == {} and p.qc_settings.block_level == "CRITICAL_ERROR"
     gate = ws.qc.export_gate()
     assert gate.needs_run and not gate.blocked  # never analysed: the export page runs QC first
     ws.save()
     saved = json.loads(f.read_text(encoding="utf-8"))
-    assert saved["schema_version"] == 8 and all(k in saved for k in qc_keys)
+    assert saved["schema_version"] == SCHEMA_VERSION and all(k in saved for k in qc_keys)
     ws.qc.engine = QCEngine([Fake("timeline", [mk(Severity.WARNING, "t.w")])])
     run_qc(ws)
     assert len(ws.project.qc_runs) == 1 and ws.project.qc_runs[0]["number"] == 1
