@@ -203,3 +203,65 @@ def test_selection_cleared_when_clip_disappears(project_ws, media_dir):
     ws.select_clip(c.id)
     ws.undo()
     assert ws.selected_clip_id is None
+
+
+# ---------------------------------------------------------------- Phase 11: command transactions
+class _Inc(Command):
+    description = "inc"
+
+    def __init__(self, box, n=1):
+        self.box, self.n = box, n
+
+    def do(self):
+        self.box[0] += self.n
+
+    def undo(self):
+        self.box[0] -= self.n
+
+
+class _Boom(Command):
+    description = "boom"
+
+    def do(self):
+        raise RuntimeError("refused")
+
+    def undo(self):
+        pass
+
+
+def test_a_transaction_is_one_undo_step_and_rolls_back_on_failure():
+    box, stack = [0], CommandStack()
+    with stack.transaction("both"):
+        stack.execute(_Inc(box))
+        stack.execute(_Inc(box, 10))
+        assert box[0] == 11  # later steps see the earlier ones
+    assert box[0] == 11 and stack.undo_text == "both" and len(stack._undo) == 1
+    stack.undo()
+    assert box[0] == 0
+    stack.redo()
+    assert box[0] == 11
+    with pytest.raises(RuntimeError):
+        with stack.transaction("fails"):
+            stack.execute(_Inc(box, 5))
+            stack.execute(_Boom())
+    assert box[0] == 11 and stack.undo_text == "both"  # the first step of the failed transaction was undone, nothing was recorded
+    with stack.transaction("empty"):
+        pass
+    assert stack.undo_text == "both"
+    with stack.transaction("outer"):
+        with stack.transaction("inner"):  # joins the outer one
+            stack.execute(_Inc(box))
+    assert stack.undo_text == "outer" and box[0] == 12
+    stack.undo()
+    assert box[0] == 11
+
+
+def test_transaction_events_fire_for_every_command_but_the_stack_state_once():
+    bus, seen, states = EventBus(), [], []
+    bus.subscribe("project.changed", lambda t, p: seen.append(p["action"]))
+    bus.subscribe("commands.changed", lambda t, p: states.append((p["can_undo"], p["undo_text"])))
+    stack, box = CommandStack(bus), [0]
+    with stack.transaction("pair"):
+        stack.execute(_Inc(box))
+        stack.execute(_Inc(box))
+    assert seen == ["do", "do"] and states[-1] == (True, "pair") and len(states) == 1

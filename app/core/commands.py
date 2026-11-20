@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 
 from app.core.constants import UNDO_LIMIT
 from app.core.events import EventBus, Topics
@@ -66,6 +67,7 @@ class CommandStack:
         self._undo: list[Command] = []
         self._redo: list[Command] = []
         self._last_time = 0.0
+        self._tx: list[Command] | None = None  # the commands of the running transaction (None = not in one)
 
     # ----- state -----
     @property
@@ -88,6 +90,11 @@ class CommandStack:
     def execute(self, command: Command) -> Command:
         """Run ``command`` and record it. If ``do`` raises, nothing is recorded."""
         command.do()
+        tx = getattr(self, "_tx", None)
+        if tx is not None:  # inside ``transaction``: done now, recorded later as one step
+            tx.append(command)
+            self._notify(command, "do", publish_stack=False)
+            return command
         now = time.monotonic()
         top = self._undo[-1] if self._undo else None
         if (
@@ -107,6 +114,47 @@ class CommandStack:
         self._last_time = now
         self._notify(command, "do")
         return command
+
+    @contextmanager
+    def transaction(self, description: str, scope: str = "timeline"):
+        """Run several commands - from any service that executes through this stack - as ONE undo step.
+
+            with commands.transaction("Apply recommendation"):
+                ws.edit.run(plan)
+                ws.presentation.update_caption(...)
+
+        Every command executed inside the block is done at once (so later steps see the earlier ones, and the change events still fire for each), but they are recorded as a single
+        composite. If anything raises, the commands done so far are undone in reverse order, nothing is recorded and the error propagates: the project is never left half modified.
+        An empty transaction records nothing. Transactions do not nest (the inner block simply joins the outer one).
+        """
+        if getattr(self, "_tx", None) is not None:
+            yield self._tx
+            return
+        done: list[Command] = []
+        self._tx = done
+        try:
+            yield done
+        except BaseException:
+            self._tx = None
+            for cmd in reversed(done):
+                try:
+                    cmd.undo()
+                except Exception:  # noqa: BLE001  (best effort: the original error is the one to report)
+                    _log.exception("rollback of %s failed", cmd.description)
+            if done:
+                self._publish_stack()
+            raise
+        self._tx = None
+        if not done:
+            return
+        composite = CompositeCommand(description, done, scope=scope)
+        composite.major = any(getattr(c, "major", True) for c in done)
+        self._undo.append(composite)
+        if len(self._undo) > self._limit:
+            del self._undo[0]
+        self._redo.clear()
+        self._last_time = 0.0
+        self._publish_stack()
 
     def undo(self) -> Command | None:
         if not self._undo:
@@ -142,11 +190,12 @@ class CommandStack:
         self._publish_stack()
 
     # ----- events -----
-    def _notify(self, command: Command, action: str) -> None:
+    def _notify(self, command: Command, action: str, publish_stack: bool = True) -> None:
         _log.debug("command %s: %s", action, command.description)
         if self._bus:
             self._bus.publish(Topics.PROJECT_CHANGED, scope=command.scope, command=command, action=action)
-        self._publish_stack()
+        if publish_stack:
+            self._publish_stack()
 
     def _publish_stack(self) -> None:
         if self._bus:

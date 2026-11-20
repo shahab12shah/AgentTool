@@ -226,6 +226,9 @@ def migrate_document(doc: dict[str, Any]) -> dict[str, Any]:
         version = 8
     if version == 8:  # Phase 8 -> Phase 10: timeline markers / range, clip links / groups / locks and track display fields are optional keys of the timeline: nothing to add
         doc["schema_version"] = 9
+        version = 9
+    if version == 9:  # Phase 10 -> Phase 11: the optional `editorial` section (absent = no editorial analysis yet): nothing to add
+        doc["schema_version"] = 10
     return doc
 
 

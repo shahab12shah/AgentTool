@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from app.analysis.models import Scene
+from app.core.constants import SCHEMA_VERSION
 from app.core.exceptions import TimelineError
 from app.rendering.models import RenderStatus
 from app.tests.conftest import import_and_wait, needs_ffmpeg, settle
@@ -229,7 +230,7 @@ def test_every_phase10_field_survives_save_close_reopen(cut_ws):
 def test_a_version_8_project_opens_unchanged_and_new_fields_are_optional(cut_ws):
     ws = cut_ws
     doc = ws.project.to_document()
-    assert doc["schema_version"] == 9
+    assert doc["schema_version"] == SCHEMA_VERSION
     for t in doc["timeline"]["tracks"]:
         assert "height" not in t and "collapsed" not in t  # defaults are not written: a v8 file and a v9 file without Phase 10 data are the same shape
     assert "markers" not in doc["timeline"] and "range" not in doc["timeline"]
@@ -237,12 +238,13 @@ def test_a_version_8_project_opens_unchanged_and_new_fields_are_optional(cut_ws)
         for c in t["clips"]:
             assert not {"link_id", "group_id", "locks"} & set(c)
     doc["schema_version"] = 8
+    doc.pop("editorial", None)
     root = ws.project.root
     (root / "project.json").write_text(json.dumps(doc))
     before = state(ws)
     ws.close_project()
     ws.open_project(root)
-    assert state(ws) == before and ws.project.to_document()["schema_version"] == 9
+    assert state(ws) == before and ws.project.to_document()["schema_version"] == SCHEMA_VERSION
 
 
 # ------------------------------------------------------------------------------------------------------------------------ autosave + change tracking + AI protection

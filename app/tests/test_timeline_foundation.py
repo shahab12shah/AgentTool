@@ -78,7 +78,7 @@ def test_schema_9_migration_is_additive():
     doc = p.to_document()
     doc8 = {**doc, "schema_version": 8}
     up = migrate_document(doc8)
-    assert up["schema_version"] == SCHEMA_VERSION == 9 and up["timeline"] == doc8["timeline"]
+    assert up["schema_version"] == SCHEMA_VERSION and up["timeline"] == doc8["timeline"]
     validate_document(up)
     again = Project.from_document(up)
     assert again.timeline.markers == [] and again.timeline.range is None
