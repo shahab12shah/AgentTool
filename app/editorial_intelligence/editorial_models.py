@@ -490,13 +490,14 @@ class EditorialState:
     user_editorial_preferences: UserEditorialPreferences = field(default_factory=UserEditorialPreferences)
     editorial_analysis_history: list[AnalysisRun] = field(default_factory=list)
     scorecard: Scorecard | None = None
-    stage_cache: dict[str, Any] = field(default_factory=dict)  # stage -> {"input_hash": ..., "scene_hashes": {scene_id: hash}}
+    sections: dict[str, dict[str, Any]] = field(default_factory=dict)  # stage id -> its merged result {"scenes": {scene_id: ...}, "global": {...}}: the canonical store; the named fields above are typed views of it
+    stage_cache: dict[str, Any] = field(default_factory=dict)  # stage -> {"gsig": project-wide input signature, "scene_hashes": {scene_id: hash}}: what a re-run compares against
     project_hash: str = ""  # the content hash of the last complete analysis (staleness)
 
     @property
     def is_empty(self) -> bool:
         return (not self.editorial_recommendations and not self.editorial_analysis_history and not self.editorial_overrides and self.narrative_structure is None
-                and not self.scene_roles and not self.findings and self.editorial_settings == EditorialSettings()
+                and not self.scene_roles and not self.findings and not self.sections and self.editorial_settings == EditorialSettings()
                 and self.user_editorial_preferences == UserEditorialPreferences())
 
     def to_dict(self) -> dict[str, Any]:

@@ -675,6 +675,6 @@ _HANDLERS: dict[str, Callable[[ProjectChangeTracker, Any], _Effect]] = {
     "ApplyResearchCommand": _h_research, "SceneDecisionCommand": _h_research,
     "RegisterReferenceCommand": _h_reference, "RemoveReferenceCommand": _h_reference, "StoreAnalysisCommand": _h_reference, "SetReferenceSettingsCommand": _h_reference, "ApplyStyleCommand": _h_reference,
     "SetRenderSettingsCommand": _h_render_settings, "RenderRecordCommand": _h_nothing, "DeleteRenderRecordCommand": _h_nothing, "SetProxyRecordCommand": _h_proxy,
-    "SetQCSettingsCommand": _h_qc_settings, "StoreQCRunCommand": _h_nothing, "IgnoreIssuesCommand": _h_nothing, "UnignoreCommand": _h_nothing, "MarkIssueFixedCommand": _h_nothing,
+    "SetQCSettingsCommand": _h_qc_settings, "StoreQCRunCommand": _h_nothing, "SetEditorialFieldsCommand": _h_nothing, "IgnoreIssuesCommand": _h_nothing, "UnignoreCommand": _h_nothing, "MarkIssueFixedCommand": _h_nothing,
     "StoreRenderQCCommand": _h_nothing, "SetPerformanceOverridesCommand": _h_nothing,
 }

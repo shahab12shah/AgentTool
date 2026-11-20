@@ -109,6 +109,15 @@ class Workspace:
         from app.services.timeline_edit_service import TimelineEditService  # noqa: PLC0415
 
         self.edit = TimelineEditService(self.projects, self.commands, self.bus, self.selection, self.edit_state, self.timeline)  # every professional edit: planner -> validated PlanCommand -> one undo step
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        from app.editorial_intelligence.editorial_service import EditorialIntelligenceService  # noqa: PLC0415
+        from app.editorial_intelligence.preference_adapter import from_plain_prefs  # noqa: PLC0415
+
+        self.editorial = EditorialIntelligenceService(self.projects, self.jobs, self.bus, self.apply_command, self.commands, lambda: self.settings)  # Phase 11: analysis -> recommendations -> user review -> one undoable transaction
+        self.editorial.tracker = self.changes
+        self.editorial.services = SimpleNamespace(edit=self.edit, presentation=self.presentation, editing=self.editing, research=self.research, timeline=self.timeline, commands=self.commands)
+        self.editorial.global_preferences = from_plain_prefs(self.settings.editorial_preferences) if self.settings.editorial_preferences else None
 
         self.bus.subscribe(Topics.PROJECT_CHANGED, self._on_project_changed)
 

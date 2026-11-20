@@ -36,6 +36,7 @@ class Topics:
     PROXY_CHANGED = "proxy.changed"  # payload: asset_id
     REFERENCE_UPDATED = "reference.updated"  # payload: reference_id, kind = imported|removed|analysis|status|active
     QC_UPDATED = "qc.updated"  # payload: kind = run_started|progress|run_finished|run_canceled|issue_changed|fix_applied|settings|render_qc
+    EDITORIAL_UPDATED = "editorial.updated"  # payload: kind = run_started|progress|run_finished|run_canceled|run_failed|recommendation_changed|settings|preferences|overrides
     REFERENCE_STYLE_CHANGED = "reference.style_changed"  # payload: action = applied|cleared|reverted|settings
     ERROR = "app.error"  # payload: message, details
     STATUS = "app.status"  # payload: message

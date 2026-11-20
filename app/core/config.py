@@ -47,6 +47,8 @@ class Settings:
     timeline_ui: dict = field(default_factory=dict)
     # Phase 10: user-customised timeline keyboard shortcuts, {action id: [key sequences]}; only the overrides of the defaults are stored. Validated by app.ui.timeline_shortcuts.TimelineShortcuts
     timeline_shortcuts: dict = field(default_factory=dict)
+    # Phase 11: the machine-wide editorial preferences (UserEditorialPreferences as a dict; local only, never uploaded). {} = nothing learned or set
+    editorial_preferences: dict = field(default_factory=dict)
 
     def sanitized(self) -> "Settings":
         """Return a copy with out-of-range values replaced by safe ones."""
@@ -71,6 +73,8 @@ class Settings:
             s.timeline_ui = {}
         if not isinstance(s.timeline_shortcuts, dict):
             s.timeline_shortcuts = {}
+        if not isinstance(s.editorial_preferences, dict):
+            s.editorial_preferences = {}
         return s
 
 
