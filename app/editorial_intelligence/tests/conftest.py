@@ -7,6 +7,7 @@ import pytest
 from app.performance.synthetic import SyntheticSpec, build_project
 from app.services.workspace import Workspace
 from app.storage.paths import AppPaths
+from app.tests.conftest import _quiet_logging, app_paths, media_dir, project_ws, ws  # noqa: F401  (the application's shared fixtures: workspace, project, tiny media)
 
 
 def make_ws(tmp_path, scenes: int = 12, **spec_kw) -> Workspace:
